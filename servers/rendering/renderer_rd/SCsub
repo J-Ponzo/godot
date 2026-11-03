@@ -10,6 +10,8 @@ SConscript("environment/SCsub")
 SConscript("storage_rd/SCsub")
 if env["forward_plus_renderer"]:
     SConscript("forward_clustered/SCsub")
+    # SHEngine fork addition: the SHE-deferred renderer builds on Forward+.
+    SConscript("she_deferred/SCsub")
 if env["forward_mobile_renderer"]:
     SConscript("forward_mobile/SCsub")
 SConscript("shaders/SCsub")

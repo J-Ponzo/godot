@@ -2489,6 +2489,8 @@ Error Main::setup(const char *execpath, int argc, char *argv[], bool p_second_ph
 #ifdef RD_ENABLED
 #ifdef FORWARD_RD_ENABLED
 	renderer_hints = "forward_plus";
+	// SHEngine fork addition: register the SHE-deferred rendering method.
+	renderer_hints += ",she_deferred";
 #endif // FORWARD_RD_ENABLED
 
 #ifdef MOBILE_RD_ENABLED
@@ -2521,6 +2523,7 @@ Error Main::setup(const char *execpath, int argc, char *argv[], bool p_second_ph
 		if (rendering_method != "forward_plus" &&
 				rendering_method != "mobile" &&
 				rendering_method != "gl_compatibility" &&
+				rendering_method != "she_deferred" && // SHEngine fork addition.
 				rendering_method != "dummy") {
 			OS::get_singleton()->print("Unknown rendering method '%s', aborting.\nValid options are ",
 					rendering_method.utf8().get_data());
@@ -2606,7 +2609,7 @@ Error Main::setup(const char *execpath, int argc, char *argv[], bool p_second_ph
 		bool valid_combination = false;
 		Vector<String> available_drivers;
 #ifdef RD_ENABLED
-		if (rendering_method == "forward_plus" || rendering_method == "mobile") {
+		if (rendering_method == "forward_plus" || rendering_method == "mobile" || rendering_method == "she_deferred") { // SHEngine fork addition: she_deferred.
 #ifdef VULKAN_ENABLED
 			available_drivers.push_back("vulkan");
 #endif

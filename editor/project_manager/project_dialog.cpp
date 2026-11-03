@@ -515,6 +515,12 @@ void ProjectDialog::_renderer_selected() {
 				String::utf8("\n•  ") + TTR("Uses RenderingDevice backend.") +
 				String::utf8("\n•  ") + TTR("Fast rendering of simple scenes."));
 		rd_error = !rendering_device_supported;
+	} else if (renderer_type == "she_deferred") { // SHEngine fork addition.
+		renderer_info->set_text(
+				String::utf8("•  ") + TTR("Supports desktop platforms only.") +
+				String::utf8("\n•  ") + TTR("SHEngine deferred renderer (work in progress).") +
+				String::utf8("\n•  ") + TTR("Uses RenderingDevice backend."));
+		rd_error = !rendering_device_supported;
 	} else if (renderer_type == "gl_compatibility") {
 		renderer_info->set_text(
 				String::utf8("•  ") + TTR("Supports desktop, mobile + web platforms.") +
@@ -586,6 +592,8 @@ void ProjectDialog::ok_pressed() {
 			project_features.push_back("Forward Plus");
 		} else if (renderer_type == "mobile") {
 			project_features.push_back("Mobile");
+		} else if (renderer_type == "she_deferred") { // SHEngine fork addition.
+			project_features.push_back("SHE-deferred");
 		} else if (renderer_type == "gl_compatibility") {
 			project_features.push_back("GL Compatibility");
 			// Also change the default renderer for the mobile override.
@@ -1153,6 +1161,21 @@ ProjectDialog::ProjectDialog() {
 	if (default_renderer_type == "mobile") {
 		rs_button->set_pressed(true);
 	}
+	// SHEngine fork addition: SHE-deferred renderer option.
+	rs_button = memnew(CheckBox);
+	rs_button->set_button_group(renderer_button_group);
+	rs_button->set_text(TTRC("SHE-deferred"));
+	rs_button->set_accessibility_name(TTRC("Renderer:"));
+#if !defined(RD_ENABLED) || !defined(FORWARD_RD_ENABLED)
+	rs_button->set_disabled(true);
+	rs_button->set_tooltip_text(TTRC("Either RenderingDevice or the Forward+ rendering method was disabled at compile time."));
+#endif
+	rs_button->set_meta(SNAME("rendering_method"), "she_deferred");
+	rs_button->connect(SceneStringName(pressed), callable_mp(this, &ProjectDialog::_renderer_selected));
+	rvb->add_child(rs_button);
+	if (default_renderer_type == "she_deferred") {
+		rs_button->set_pressed(true);
+	}
 	rs_button = memnew(CheckBox);
 	rs_button->set_button_group(renderer_button_group);
 	rs_button->set_text(TTRC("Compatibility"));
@@ -1173,6 +1196,27 @@ ProjectDialog::ProjectDialog() {
 		rs_button->set_pressed(true);
 	}
 #endif
+	// SHEngine fork addition: a stored default renderer that no available
+	// renderer matches (e.g. a default saved by another build) would leave
+	// nothing selected and crash in ok_pressed(). Fall back to a valid one.
+	if (renderer_button_group->get_pressed_button() == nullptr) {
+		String fallback_renderer_type;
+#if defined(FORWARD_RD_ENABLED)
+		fallback_renderer_type = "forward_plus";
+#elif defined(MOBILE_RD_ENABLED)
+		fallback_renderer_type = "mobile";
+#elif defined(GLES3_ENABLED)
+		fallback_renderer_type = "gl_compatibility";
+#endif
+		List<BaseButton *> renderer_buttons;
+		renderer_button_group->get_buttons(&renderer_buttons);
+		for (BaseButton *button : renderer_buttons) {
+			if (button->get_meta(SNAME("rendering_method")) == fallback_renderer_type) {
+				button->set_pressed(true);
+				break;
+			}
+		}
+	}
 	rshc->add_child(memnew(VSeparator));
 
 	// Right hand side, used for text explaining each choice.

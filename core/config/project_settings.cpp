@@ -107,6 +107,8 @@ const PackedStringArray ProjectSettings::_get_supported_features() {
 #ifdef RD_ENABLED
 #ifdef FORWARD_RD_ENABLED
 	features.append("Forward Plus");
+	// SHEngine fork addition: the SHE-deferred renderer.
+	features.append("SHE-deferred");
 #endif // FORWARD_RD_ENABLED
 #ifdef MOBILE_RD_ENABLED
 	features.append("Mobile");

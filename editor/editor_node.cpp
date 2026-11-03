@@ -7956,6 +7956,9 @@ String EditorNode::_to_rendering_method_display_name(const String &p_rendering_m
 	if (p_rendering_method == "forward_plus") {
 		return TTR("Forward+");
 	}
+	if (p_rendering_method == "she_deferred") { // SHEngine fork addition.
+		return TTR("SHE-deferred");
+	}
 	if (p_rendering_method == "mobile") {
 		return TTR("Mobile");
 	}
