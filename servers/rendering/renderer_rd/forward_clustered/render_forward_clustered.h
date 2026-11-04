@@ -168,7 +168,11 @@ public:
 		static uint32_t get_voxelgi_usage_bits(bool p_resolve, bool p_msaa, bool p_storage);
 	};
 
-private:
+// SHEngine fork addition: this section is protected instead of private so the
+// SHE-deferred renderer (RenderSHEDeferred) can reuse the Forward+ machinery
+// (render lists, environment setup, scene shader, buffer data) instead of
+// duplicating it.
+protected:
 	virtual void setup_render_buffer_data(Ref<RenderSceneBuffersRD> p_render_buffers) override;
 
 	RID render_base_uniform_set;

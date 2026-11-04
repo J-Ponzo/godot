@@ -31,6 +31,18 @@
 #pragma once
 
 #include "servers/rendering/renderer_rd/forward_clustered/render_forward_clustered.h"
+#include "servers/rendering/renderer_rd/pipeline_cache_rd.h"
+#include "servers/rendering/storage/ltc_lut.gen.h"
+#include "servers/rendering/renderer_rd/shaders/she_deferred/she_deferred_lighting.glsl.gen.h"
+
+#define RB_SCOPE_SHE_DEFERRED SNAME("she_deferred")
+
+#define RB_TEX_GB_ALBEDO SNAME("gbuffer_albedo")
+#define RB_TEX_GB_NORMAL SNAME("gbuffer_normal")
+#define RB_TEX_GB_ORM SNAME("gbuffer_orm")
+#define RB_TEX_GB_EMISSION SNAME("gbuffer_emission")
+#define RB_TEX_GB_DEPTH SNAME("gbuffer_depth")
+#define RB_TEX_GB_DEPTH_ATTACHMENT SNAME("gbuffer_depth_attachment")
 
 namespace RendererSceneRenderImplementation {
 
@@ -41,13 +53,43 @@ namespace RendererSceneRenderImplementation {
 // Forward+ renderer (storages, cluster builder, light pipeline) to keep the
 // divergence from upstream minimal.
 //
-// Step A (plumbing): the actual G-buffer and shading passes are not
-// implemented yet. The scene is rendered with the inherited Forward+ path,
-// then the final render target is painted magenta, so any capture (e.g. the
-// render harness) proves this renderer is the one in charge.
+// Step B1: deferred for opaque geometry.
+// - Geometry pass: reuses the Forward+ material-mode pipelines
+//   (MODE_RENDER_MATERIAL) through the inherited _render_material() to fill
+//   the G-buffer (albedo, normal, ORM, emission, view-space depth).
+// - Shading pass: fullscreen pass applying ambient and directional light
+//   contributions to the G-buffer, into the HDR color buffer.
+// Unsupported cases (reflection probes, multiview) fall back to the
+// inherited Forward+ implementation. Shadows, clustered positional lights,
+// GI, volumetrics and transparent objects are not handled by the deferred
+// path yet.
 class RenderSHEDeferred : public RenderForwardClustered {
+private:
+	// Step B1: fullscreen deferred lighting pass.
+	SheDeferredLightingShaderRD lighting_shader;
+	RID lighting_shader_version;
+	PipelineCacheRD lighting_pipeline;
+	RID lighting_scene_data_ubo = RID();
+
+	// Multiscatter energy compensation LUT, generated like the Forward+ one
+	// (the Forward+ dfg_lut member is private, its shader class is shared).
+	RID dfg_texture = RID();
+
+	// Area light LTC lookup tables, created from the shared ltc_lut.gen.h
+	// like the Forward+ ones (its ltc member is private). Created lazily in
+	// ensure_lighting_luts(): RS is not ready during construction.
+	RID ltc_lut1_texture = RID();
+	RID ltc_lut2_texture = RID();
+
+	void ensure_lighting_luts();
+
 public:
-	void render_scene(const Ref<RenderSceneBuffers> &p_render_buffers, const CameraData *p_camera_data, const CameraData *p_prev_camera_data, const PagedArray<RenderGeometryInstance *> &p_instances, const PagedArray<RID> &p_lights, const PagedArray<RID> &p_reflection_probes, const PagedArray<RID> &p_voxel_gi_instances, const PagedArray<RID> &p_decals, const PagedArray<RID> &p_lightmaps, const PagedArray<RID> &p_fog_volumes, RID p_environment, RID p_camera_attributes, RID p_compositor, RID p_shadow_atlas, RID p_occluder_debug_tex, RID p_reflection_atlas, RID p_reflection_probe, int p_reflection_probe_pass, float p_screen_mesh_lod_threshold, const RenderShadowData *p_render_shadows, int p_render_shadow_count, const RenderSDFGIData *p_render_sdfgi_regions, int p_render_sdfgi_region_count, float p_window_output_max_value, const RenderSDFGIUpdateData *p_sdfgi_update_data = nullptr, RenderingServerTypes::RenderInfo *r_render_info = nullptr) override;
+	void setup_render_buffer_data(Ref<RenderSceneBuffersRD> p_render_buffers) override;
+
+	void _render_scene(RenderDataRD *p_render_data, const Color &p_default_bg_color) override;
+
+	RenderSHEDeferred();
+	~RenderSHEDeferred();
 };
 
 } // namespace RendererSceneRenderImplementation
