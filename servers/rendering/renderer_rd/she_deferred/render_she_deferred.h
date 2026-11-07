@@ -59,10 +59,14 @@ namespace RendererSceneRenderImplementation {
 //   the G-buffer (albedo, normal, ORM, emission, view-space depth).
 // - Shading pass: fullscreen pass applying ambient and directional light
 //   contributions to the G-buffer, into the HDR color buffer.
-// Unsupported cases (reflection probes, multiview) fall back to the
-// inherited Forward+ implementation. Shadows, clustered positional lights,
-// GI, volumetrics and transparent objects are not handled by the deferred
-// path yet.
+// Step B2: clustered positional lights (omni/spot). The inherited Forward+
+// cluster builder is driven by our _render_scene() (begin, update_light_buffers
+// which feeds it, bake) and the shading pass iterates its cluster buffer with
+// the shared Forward+ light processing functions.
+// Unsupported cases (reflection probes, multiview) fail loudly instead of
+// silently falling back to Forward+ (see the she_deferred/README.md).
+// Shadows, GI, volumetrics and transparent objects are not handled by the
+// deferred path yet.
 class RenderSHEDeferred : public RenderForwardClustered {
 private:
 	// Step B1: fullscreen deferred lighting pass.

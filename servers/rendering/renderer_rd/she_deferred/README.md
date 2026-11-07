@@ -44,12 +44,26 @@ unavoidable, and every such touch is listed below.
     pass reading the G-buffer, applying ambient + directional light
     contributions (Forward+ `light_compute`, incl. Burley diffuse, Schlick-GGX
     specular, multiscatter energy compensation) into the HDR color buffer,
-    before the inherited post-process chain.
+    before the inherited post-process chain. Step B2 added the clustered
+    positional light (omni/spot) iteration on top (see step B2 below).
   - Cross-comparison parity vs the Forward+ oracle on the B1 scope scenes
     (`brdf_chart_001`, `lights_many_directional_001`): rmse < 0.7 (filmic
     tonemapped, 8-bit), determinism bit-perfect.
-- **Step B2 (next)**: clustered positional lights (omni/spot) in the shading
-  pass, reusing the Forward+ cluster iteration GLSL.
+- **Step B2 (done)**: clustered positional lights (omni/spot) in the shading pass.
+  - The inherited Forward+ cluster builder (living on the Forward+ render
+    buffer data, `RB_SCOPE_FORWARD_CLUSTERED`) is driven directly by
+    `_render_scene()`: `begin()`, then `LightStorage::update_light_buffers()`
+    (whose `setup_added_light()` hook feeds the builder), then `bake_cluster()`.
+  - The shading pass iterates the cluster buffer with the same storage layout
+    and helpers as the Forward+ scene shader (minus its subgroup
+    optimizations), calling the shared `light_process_omni`/`light_process_spot`
+    from `scene_forward_lights_inc.glsl`. Cluster layout parameters
+    (`cluster_shift/width/type_size`, element count div 32) are passed through
+    the lighting pass push constant, computed with the same math as
+    `RenderForwardClustered::_setup_environment()`.
+  - Not applied (no per-pixel instance data in the G-buffer): light cull masks
+    vs visual instance layers, and skipping statically-baked lights on
+    lightmapped instances. No harness scene in the current scope uses either.
 - **Step B3+**: shadow maps, transparent-object pass (intentional Forward+
   reuse case), sky, GI/effects, as prioritized by the harness scenes.
 
@@ -119,9 +133,11 @@ Design notes for future merges:
   construction), both through shared data/classes (the Forward+ members are
   private).
 
-## Known limitations (B1)
+## Known limitations (B2)
 
-- Directional lights + ambient only; clustered positional lights land in B2.
+- Directional + clustered positional (omni/spot) lights + ambient; positional
+  light cull masks and lightmap baked-light culling are not applied (no
+  per-pixel instance data in the G-buffer).
 - No shadow maps, no GI, no volumetrics, no transparent objects, no MSAA
   (warned once and ignored), no reflection probes / multiview (error + skip),
   no sky (error + clear color).

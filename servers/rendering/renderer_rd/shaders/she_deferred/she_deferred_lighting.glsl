@@ -2,8 +2,9 @@
  *
  * Reads the G-buffer filled by the deferred geometry pass (which reuses the
  * Forward+ material-mode pipelines, see render_she_deferred.cpp) and applies
- * ambient and directional light contributions into the HDR color buffer.
- * Clustered positional lights, shadow maps and GI are not implemented yet.
+ * ambient, directional light and clustered positional light (omni/spot, step
+ * B2) contributions into the HDR color buffer. Shadow maps and GI are not
+ * implemented yet.
  */
 
 #[vertex]
@@ -73,6 +74,13 @@ layout(set = 0, binding = 19) uniform texture2D decal_atlas;
 layout(set = 0, binding = 20) uniform sampler DEFAULT_SAMPLER_LINEAR_WITH_MIPMAPS_CLAMP;
 layout(set = 0, binding = 21) uniform texture2DArray reflection_atlas;
 
+/* Cluster data for the positional lights, baked every frame by the
+ * inherited Forward+ cluster builder (see render_she_deferred.cpp). */
+layout(set = 0, binding = 22, std430) restrict readonly buffer ClusterBuffer {
+	uint data[];
+}
+cluster_buffer;
+
 layout(set = 0, binding = 0, std140) uniform SceneDataBlock {
 	SceneData data;
 	SceneData prev_data;
@@ -106,8 +114,10 @@ layout(location = 0) in vec2 uv_interp;
 layout(push_constant, std430) uniform Params {
 	uint directional_light_count;
 	float luminance_multiplier;
-	uint pad0;
-	uint pad1;
+	uint cluster_shift;
+	uint cluster_width;
+	uint cluster_type_size;
+	uint max_cluster_element_count_div_32;
 }
 push_constant;
 
@@ -135,6 +145,23 @@ vec2 prefiltered_dfg(float lod, float NoV) {
 // https://google.github.io/filament/Filament.html#listing_energycompensationimpl
 vec3 get_energy_compensation(vec3 f0, float env) {
 	return 1.0 + f0 * (1.0 / env - 1.0);
+}
+
+/* Cluster iteration helpers, same storage layout as the Forward+ scene
+ * shader (scene_forward_clustered.glsl). */
+void cluster_get_item_range(uint p_offset, out uint item_min, out uint item_max, out uint item_from, out uint item_to) {
+	uint item_min_max = cluster_buffer.data[p_offset];
+	item_min = item_min_max & 0xFFFFu;
+	item_max = item_min_max >> 16;
+
+	item_from = item_min >> 5;
+	item_to = (item_max == 0) ? 0 : ((item_max - 1) >> 5) + 1; //side effect of how it is stored, as item_max 0 means no elements
+}
+
+uint cluster_get_range_clip_mask(uint i, uint z_min, uint z_max) {
+	int local_min = clamp(int(z_min) - int(i) * 32, 0, 31);
+	int mask_width = min(int(z_max) - int(z_min), 32 - local_min);
+	return bitfieldInsert(uint(0), uint(0xFFFFFFFF), local_min, mask_width);
 }
 
 layout(location = 0) out vec4 frag_color;
@@ -197,6 +224,73 @@ void main() {
 				uv_interp,
 				energy_compensation,
 				diffuse, specular);
+	}
+
+	/* Clustered positional lights (step B2): iterate the cluster baked by
+	 * the inherited Forward+ cluster builder, same buffer layout as the
+	 * Forward+ scene shader but without the subgroup optimizations (the
+	 * shading pass is a fullscreen pass, forward divergence is negligible).
+	 * Light cull masks and lightmap baked-light culling are not applied:
+	 * the G-buffer carries no per-pixel instance data. */
+	{
+		// The shading pass renders the internal texture 1:1, so its
+		// gl_FragCoord matches the cluster grid orientation.
+		uvec2 cluster_pos = uvec2(gl_FragCoord.xy) >> push_constant.cluster_shift;
+		uint cluster_offset = (push_constant.cluster_width * cluster_pos.y + cluster_pos.x) * (push_constant.max_cluster_element_count_div_32 + 32);
+		uint cluster_z = uint(clamp((-view_position.z / scene_data_block.data.z_far) * 32.0, 0.0, 31.0));
+
+		// Only used by soft shadows and light projectors, both stubbed off.
+		vec3 vertex_dd = vec3(0.0);
+
+		{ //omni lights
+			uint cluster_omni_offset = cluster_offset;
+
+			uint item_min;
+			uint item_max;
+			uint item_from;
+			uint item_to;
+
+			cluster_get_item_range(cluster_omni_offset + push_constant.max_cluster_element_count_div_32 + cluster_z, item_min, item_max, item_from, item_to);
+
+			for (uint i = item_from; i < item_to; i++) {
+				uint mask = cluster_buffer.data[cluster_omni_offset + i];
+				mask &= cluster_get_range_clip_mask(i, item_min, item_max);
+
+				while (mask != 0) {
+					uint bit = findMSB(mask);
+					mask &= ~(1u << bit);
+
+					uint light_index = 32u * i + bit;
+					light_process_omni(light_index, view_position, hvec3(view_dir), hvec3(normal), vertex_dd, vertex_dd, f0, half(roughness), half(metallic), scene_data_block.data.taa_frame_count, hvec3(albedo), alpha, uv_interp, energy_compensation,
+							diffuse, specular);
+				}
+			}
+		}
+
+		{ //spot lights
+			uint cluster_spot_offset = cluster_offset + push_constant.cluster_type_size;
+
+			uint item_min;
+			uint item_max;
+			uint item_from;
+			uint item_to;
+
+			cluster_get_item_range(cluster_spot_offset + push_constant.max_cluster_element_count_div_32 + cluster_z, item_min, item_max, item_from, item_to);
+
+			for (uint i = item_from; i < item_to; i++) {
+				uint mask = cluster_buffer.data[cluster_spot_offset + i];
+				mask &= cluster_get_range_clip_mask(i, item_min, item_max);
+
+				while (mask != 0) {
+					uint bit = findMSB(mask);
+					mask &= ~(1u << bit);
+
+					uint light_index = 32u * i + bit;
+					light_process_spot(light_index, view_position, hvec3(view_dir), hvec3(normal), vertex_dd, vertex_dd, f0, half(roughness), half(metallic), scene_data_block.data.taa_frame_count, hvec3(albedo), alpha, uv_interp, energy_compensation,
+							diffuse, specular);
+				}
+			}
+		}
 	}
 
 	// Composition, mirroring the Forward+ opaque pass: diffuse and ambient

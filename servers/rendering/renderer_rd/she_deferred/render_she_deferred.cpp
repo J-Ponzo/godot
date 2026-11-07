@@ -117,6 +117,22 @@ void RenderSHEDeferred::_render_scene(RenderDataRD *p_render_data, const Color &
 		WARN_PRINT_ONCE("SHE-deferred: MSAA is not supported by the deferred path yet, rendering ignoring it.");
 	}
 
+	// Positional light clusters (step B2): reuse the inherited Forward+
+	// cluster builder living on the Forward+ render buffer data (created by
+	// the inherited setup_render_buffer_data()). update_light_buffers(), called
+	// below, feeds it through the setup_added_light() hook; bake_cluster()
+	// then produces the buffer read by the lighting pass.
+	Ref<RenderForwardClustered::RenderBufferDataForwardClustered> forward_rb_data;
+	if (rb->has_custom_data(RB_SCOPE_FORWARD_CLUSTERED)) {
+		forward_rb_data = rb->get_custom_data(RB_SCOPE_FORWARD_CLUSTERED);
+	}
+	ERR_FAIL_NULL(forward_rb_data);
+
+	// A reflection probe render was rejected above, so this is always a
+	// normal (non-flipped-Y) viewport render.
+	current_cluster_builder = forward_rb_data->cluster_builder;
+	current_cluster_builder->begin(p_render_data->scene_data->cam_transform, p_render_data->scene_data->cam_projection, true);
+
 	// Update the light buffers (directional light data + count). Forward+
 	// does this in _pre_opaque_render(), which the deferred path does not run.
 	{
@@ -127,6 +143,9 @@ void RenderSHEDeferred::_render_scene(RenderDataRD *p_render_data, const Color &
 		p_render_data->directional_light_count = directional_light_count;
 		p_render_data->scene_data->directional_light_count = directional_light_count;
 	}
+
+	// Bake the cluster data now that every positional light has been added.
+	current_cluster_builder->bake_cluster();
 
 	p_render_data->scene_data->directional_light_count = p_render_data->directional_light_count;
 
@@ -215,18 +234,36 @@ void RenderSHEDeferred::_render_scene(RenderDataRD *p_render_data, const Color &
 				RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 18, RendererRD::LightStorage::get_singleton()->get_reflection_probe_buffer()),
 				RD::Uniform(RD::UNIFORM_TYPE_TEXTURE, 19, RendererRD::TextureStorage::get_singleton()->decal_atlas_get_texture()),
 				RD::Uniform(RD::UNIFORM_TYPE_SAMPLER, 20, default_sampler_mipmaps),
-				RD::Uniform(RD::UNIFORM_TYPE_TEXTURE, 21, ref_texture.is_valid() ? ref_texture : RendererRD::TextureStorage::get_singleton()->texture_rd_get_default(RendererRD::TextureStorage::DEFAULT_RD_TEXTURE_2D_ARRAY_BLACK)));
+				RD::Uniform(RD::UNIFORM_TYPE_TEXTURE, 21, ref_texture.is_valid() ? ref_texture : RendererRD::TextureStorage::get_singleton()->texture_rd_get_default(RendererRD::TextureStorage::DEFAULT_RD_TEXTURE_2D_ARRAY_BLACK)),
+				RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 22, current_cluster_builder->get_cluster_buffer()));
+
+		// Cluster iteration parameters for the shading pass, same layout math as
+		// RenderForwardClustered::_setup_environment().
+		uint32_t cluster_shift = Math::get_shift_from_power_of_2(current_cluster_builder->get_cluster_size());
+		uint32_t max_cluster_element_count_div_32 = current_cluster_builder->get_max_cluster_elements() / 32;
+		uint32_t cluster_width = 0;
+		uint32_t cluster_type_size = 0;
+		{
+			uint32_t cluster_screen_width = Math::division_round_up((uint32_t)screen_size.width, current_cluster_builder->get_cluster_size());
+			uint32_t cluster_screen_height = Math::division_round_up((uint32_t)screen_size.height, current_cluster_builder->get_cluster_size());
+			cluster_type_size = cluster_screen_width * cluster_screen_height * (max_cluster_element_count_div_32 + 32);
+			cluster_width = cluster_screen_width;
+		}
 
 		struct {
 			uint32_t directional_light_count;
 			float luminance_multiplier;
-			uint32_t pad0;
-			uint32_t pad1;
+			uint32_t cluster_shift;
+			uint32_t cluster_width;
+			uint32_t cluster_type_size;
+			uint32_t max_cluster_element_count_div_32;
 		} push_constant;
 		push_constant.directional_light_count = p_render_data->directional_light_count;
 		push_constant.luminance_multiplier = rb->get_luminance_multiplier();
-		push_constant.pad0 = 0;
-		push_constant.pad1 = 0;
+		push_constant.cluster_shift = cluster_shift;
+		push_constant.cluster_width = cluster_width;
+		push_constant.cluster_type_size = cluster_type_size;
+		push_constant.max_cluster_element_count_div_32 = max_cluster_element_count_div_32;
 
 		RD::DrawListID draw_list = RD::get_singleton()->draw_list_begin(color_fb, RD::DRAW_CLEAR_COLOR_0, Vector<Color>({ clear_color }));
 		RD::get_singleton()->draw_list_bind_render_pipeline(draw_list, lighting_pipeline.get_render_pipeline(RD::INVALID_ID, RD::get_singleton()->framebuffer_get_format(color_fb)));
@@ -301,6 +338,15 @@ RenderSHEDeferred::RenderSHEDeferred() {
 
 RenderSHEDeferred::~RenderSHEDeferred() {
 	lighting_shader.version_free(lighting_shader_version);
+
+	// Free the deferred pass resources created with RD directly (the ones
+	// owned by RS, the LTC LUTs, are freed below with RS::free_rid).
+	if (dfg_texture.is_valid()) {
+		RD::get_singleton()->free_rid(dfg_texture);
+	}
+	if (lighting_scene_data_ubo.is_valid()) {
+		RD::get_singleton()->free_rid(lighting_scene_data_ubo);
+	}
 
 	if (ltc_lut1_texture.is_valid()) {
 		RS::get_singleton()->free_rid(ltc_lut1_texture);
