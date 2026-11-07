@@ -30,6 +30,7 @@
 
 #include "render_she_deferred.h"
 
+#include "core/config/project_settings.h"
 #include "core/io/image.h"
 #include "servers/rendering/rendering_server.h"
 #include "servers/rendering/rendering_device.h"
@@ -133,21 +134,60 @@ void RenderSHEDeferred::_render_scene(RenderDataRD *p_render_data, const Color &
 	current_cluster_builder = forward_rb_data->cluster_builder;
 	current_cluster_builder->begin(p_render_data->scene_data->cam_transform, p_render_data->scene_data->cam_projection, true);
 
-	// Update the light buffers (directional light data + count). Forward+
-	// does this in _pre_opaque_render(), which the deferred path does not run.
+	// Shadow maps (step B3): render the scheduled directional/omni/spot
+	// shadow passes through the inherited Forward+ orchestration
+	// (_render_shadow_passes, extracted from _pre_opaque_render) BEFORE the
+	// light buffers are refreshed, so the shadow state they mutate
+	// (directional atlas rects, finalized omni cubemaps) is picked up. This
+	// mirrors the Forward+ order: its shadow passes run between the two
+	// _setup_environment() calls that update the light buffers. The deferred
+	// path runs no GI, so shadow end follows immediately.
+	if (p_render_data->render_shadow_count > 0) {
+		if (_render_shadow_passes(p_render_data, false)) {
+			_render_shadow_end();
+		}
+	}
+
+	// The shadow passes internally run the inherited Forward+
+	// _setup_environment() (through _render_shadow_append(), which drives the
+	// cluster builder with the shadow pass data); re-begin the builder with
+	// the main camera before adding the scene lights, like the Forward+
+	// _setup_environment() that follows _pre_opaque_render().
+	current_cluster_builder->begin(p_render_data->scene_data->cam_transform, p_render_data->scene_data->cam_projection, true);
+
+	// Update the light buffers (directional light data + count, positional
+	// shadow matrices). Forward+ does this in _setup_environment(), which
+	// the deferred path does not run.
+	bool positional_light_soft_shadows = false;
 	{
 		RendererRD::LightStorage *light_storage = RendererRD::LightStorage::get_singleton();
 		uint32_t directional_light_count = 0;
 		uint32_t positional_light_count = 0;
-		light_storage->update_light_buffers(p_render_data, *p_render_data->lights, p_render_data->scene_data->cam_transform, p_render_data->shadow_atlas, false, directional_light_count, positional_light_count, p_render_data->directional_light_soft_shadows);
+		light_storage->update_light_buffers(p_render_data, *p_render_data->lights, p_render_data->scene_data->cam_transform, p_render_data->shadow_atlas, true, directional_light_count, positional_light_count, p_render_data->directional_light_soft_shadows);
 		p_render_data->directional_light_count = directional_light_count;
 		p_render_data->scene_data->directional_light_count = directional_light_count;
+
+		// Forward+ decides positional soft shadows per instance from its
+		// material light lists (uses_softshadow: light has a non-zero size,
+		// or is an area light). The deferred shading pass has no per-pixel
+		// instance data, so the flag is scene-global here; the per-light
+		// size check inside the shared light processing functions keeps the
+		// result identical pixel by pixel.
+		for (int i = 0; i < (int)p_render_data->lights->size(); i++) {
+			RID base = light_storage->light_instance_get_base_light((*p_render_data->lights)[i]);
+			if (light_storage->light_get_type(base) == RSE::LIGHT_DIRECTIONAL) {
+				continue;
+			}
+			if (light_storage->light_get_type(base) == RSE::LIGHT_AREA ||
+					light_storage->light_get_param(base, RSE::LIGHT_PARAM_SIZE) > CMP_EPSILON) {
+				positional_light_soft_shadows = true;
+				break;
+			}
+		}
 	}
 
 	// Bake the cluster data now that every positional light has been added.
 	current_cluster_builder->bake_cluster();
-
-	p_render_data->scene_data->directional_light_count = p_render_data->directional_light_count;
 
 	Size2i screen_size = rb->get_internal_size();
 
@@ -212,6 +252,20 @@ void RenderSHEDeferred::_render_scene(RenderDataRD *p_render_data, const Color &
 		// texture only when it is actually valid.
 		RID ref_texture = p_render_data->reflection_atlas.is_valid() ? RendererRD::LightStorage::get_singleton()->reflection_atlas_get_texture(p_render_data->reflection_atlas) : RID();
 
+		// Shadow atlases (step B3): bind the default depth texture when an
+		// atlas does not exist, like the Forward+ render pass set.
+		RID directional_shadow_texture = RendererRD::LightStorage::get_singleton()->directional_shadow_get_texture();
+		if (!directional_shadow_texture.is_valid()) {
+			directional_shadow_texture = RendererRD::TextureStorage::get_singleton()->texture_rd_get_default(RendererRD::TextureStorage::DEFAULT_RD_TEXTURE_DEPTH);
+		}
+		RID shadow_atlas_texture;
+		if (p_render_data->shadow_atlas.is_valid()) {
+			shadow_atlas_texture = RendererRD::LightStorage::get_singleton()->shadow_atlas_get_texture(p_render_data->shadow_atlas);
+		}
+		if (!shadow_atlas_texture.is_valid()) {
+			shadow_atlas_texture = RendererRD::TextureStorage::get_singleton()->texture_rd_get_default(RendererRD::TextureStorage::DEFAULT_RD_TEXTURE_DEPTH);
+		}
+
 		RID u_scene_data = UniformSetCacheRD::get_singleton()->get_cache(lighting_shader_rid, 0,
 				RD::Uniform(RD::UNIFORM_TYPE_UNIFORM_BUFFER, 0, lighting_scene_data_ubo),
 				RD::Uniform(RD::UNIFORM_TYPE_UNIFORM_BUFFER, 1, RendererRD::LightStorage::get_singleton()->get_directional_light_buffer()),
@@ -235,8 +289,10 @@ void RenderSHEDeferred::_render_scene(RenderDataRD *p_render_data, const Color &
 				RD::Uniform(RD::UNIFORM_TYPE_TEXTURE, 19, RendererRD::TextureStorage::get_singleton()->decal_atlas_get_texture()),
 				RD::Uniform(RD::UNIFORM_TYPE_SAMPLER, 20, default_sampler_mipmaps),
 				RD::Uniform(RD::UNIFORM_TYPE_TEXTURE, 21, ref_texture.is_valid() ? ref_texture : RendererRD::TextureStorage::get_singleton()->texture_rd_get_default(RendererRD::TextureStorage::DEFAULT_RD_TEXTURE_2D_ARRAY_BLACK)),
-				RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 22, current_cluster_builder->get_cluster_buffer()));
-
+				RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 22, current_cluster_builder->get_cluster_buffer()),
+				RD::Uniform(RD::UNIFORM_TYPE_TEXTURE, 23, directional_shadow_texture),
+				RD::Uniform(RD::UNIFORM_TYPE_TEXTURE, 24, shadow_atlas_texture),
+				RD::Uniform(RD::UNIFORM_TYPE_SAMPLER, 25, shadow_sampler));
 		// Cluster iteration parameters for the shading pass, same layout math as
 		// RenderForwardClustered::_setup_environment().
 		uint32_t cluster_shift = Math::get_shift_from_power_of_2(current_cluster_builder->get_cluster_size());
@@ -257,6 +313,11 @@ void RenderSHEDeferred::_render_scene(RenderDataRD *p_render_data, const Color &
 			uint32_t cluster_width;
 			uint32_t cluster_type_size;
 			uint32_t max_cluster_element_count_div_32;
+			uint32_t feature_flags;
+			uint32_t soft_shadow_samples;
+			uint32_t penumbra_shadow_samples;
+			uint32_t directional_soft_shadow_samples;
+			uint32_t directional_penumbra_shadow_samples;
 		} push_constant;
 		push_constant.directional_light_count = p_render_data->directional_light_count;
 		push_constant.luminance_multiplier = rb->get_luminance_multiplier();
@@ -264,6 +325,26 @@ void RenderSHEDeferred::_render_scene(RenderDataRD *p_render_data, const Color &
 		push_constant.cluster_width = cluster_width;
 		push_constant.cluster_type_size = cluster_type_size;
 		push_constant.max_cluster_element_count_div_32 = max_cluster_element_count_div_32;
+		push_constant.feature_flags = 0;
+		if (p_render_data->directional_light_soft_shadows) {
+			push_constant.feature_flags |= 1;
+		}
+		if (positional_light_soft_shadows) {
+			push_constant.feature_flags |= 2;
+		}
+		if (GLOBAL_GET_CACHED(bool, "rendering/lights_and_shadows/multi_bounce_occlusion/enabled")) {
+			push_constant.feature_flags |= 4;
+		}
+		/* Shadow filter sample counts, matching the Forward+ pipeline
+		 * specialization (its default_specialization is refreshed when the
+		 * quality settings change). Read at frame time: they are only valid
+		 * after RendererSceneRenderRD::init() applies the project settings.
+		 * Not a specialization constant here: the lighting pass is a single
+		 * pipeline, the counts go through the push constant instead. */
+		push_constant.soft_shadow_samples = soft_shadow_samples_get();
+		push_constant.penumbra_shadow_samples = penumbra_shadow_samples_get();
+		push_constant.directional_soft_shadow_samples = directional_soft_shadow_samples_get();
+		push_constant.directional_penumbra_shadow_samples = directional_penumbra_shadow_samples_get();
 
 		RD::DrawListID draw_list = RD::get_singleton()->draw_list_begin(color_fb, RD::DRAW_CLEAR_COLOR_0, Vector<Color>({ clear_color }));
 		RD::get_singleton()->draw_list_bind_render_pipeline(draw_list, lighting_pipeline.get_render_pipeline(RD::INVALID_ID, RD::get_singleton()->framebuffer_get_format(color_fb)));

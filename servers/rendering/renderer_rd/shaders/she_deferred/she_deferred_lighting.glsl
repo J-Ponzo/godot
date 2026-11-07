@@ -3,8 +3,15 @@
  * Reads the G-buffer filled by the deferred geometry pass (which reuses the
  * Forward+ material-mode pipelines, see render_she_deferred.cpp) and applies
  * ambient, directional light and clustered positional light (omni/spot, step
- * B2) contributions into the HDR color buffer. Shadow maps and GI are not
- * implemented yet.
+ * B2) contributions, with shadow maps (directional PSSM, omni dual
+ * paraboloid/cube, spot; step B3), into the HDR color buffer. GI and
+ * volumetrics are not implemented yet.
+ *
+ * Shadow map sampling reuses the shared Forward+ light processing functions
+ * (scene_forward_lights_inc.glsl) for the positional lights and the shared
+ * directional PSSM function (scene_forward_directional_shadow_inc.glsl,
+ * extracted from the Forward+ scene shader so both methods run the exact
+ * same math; see the README sync checklist).
  */
 
 #[vertex]
@@ -42,8 +49,8 @@ void main() {
 #include "../oct_inc.glsl"
 
 /* Declarations required by the shared Forward+ light processing functions
- * (positional light buffers and decal atlas are shared storages; the sc_*
- * helpers are stubbed until soft shadows and light projectors land). */
+ * (positional light buffers and decal atlas are shared storages; the
+ * projector helpers are stubbed until light projectors land). */
 layout(set = 0, binding = 8, std430) restrict readonly buffer OmniLights {
 	LightData data[];
 }
@@ -87,8 +94,35 @@ layout(set = 0, binding = 0, std140) uniform SceneDataBlock {
 }
 scene_data_block;
 
+/* Shadow maps (step B3): same textures and comparison sampler as the
+ * Forward+ scene pass (a single nearest/COMPARE_GREATER sampler is shared by
+ * the directional and positional atlases). The renderer binds the default
+ * depth texture when the atlas does not exist, like Forward+. */
+layout(set = 0, binding = 23) uniform texture2D directional_shadow_atlas;
+layout(set = 0, binding = 24) uniform texture2D shadow_atlas;
+layout(set = 0, binding = 25) uniform sampler shadow_sampler;
+
+layout(push_constant, std430) uniform Params {
+	uint directional_light_count;
+	float luminance_multiplier;
+	uint cluster_shift;
+	uint cluster_width;
+	uint cluster_type_size;
+	uint max_cluster_element_count_div_32;
+	uint feature_flags; /* bit 0: directional light soft shadows, bit 1: positional light soft shadows, bit 2: multi-bounce ambient occlusion */
+	uint soft_shadow_samples;
+	uint penumbra_shadow_samples;
+	uint directional_soft_shadow_samples;
+	uint directional_penumbra_shadow_samples;
+}
+push_constant;
+
 bool sc_use_light_soft_shadows() {
-	return false;
+	return (push_constant.feature_flags & 2u) != 0u;
+}
+
+bool sc_use_directional_soft_shadows() {
+	return (push_constant.feature_flags & 1u) != 0u;
 }
 
 bool sc_use_light_projector() {
@@ -99,32 +133,44 @@ bool sc_projector_use_mipmaps() {
 	return false;
 }
 
-/* Reuse the Forward+ BRDF code directly instead of copying it, so upstream
- * changes are picked up automatically. The material BRDF defaults match the
- * ones the Forward+ shader compiler emits for StandardMaterial3D; the
- * optional material features compile out through their defines; the shadow
- * sampling functions compile out with SHADOWS_DISABLED. */
-#define DIFFUSE_BURLEY
-#define SPECULAR_SCHLICK_GGX
-#define SHADOWS_DISABLED
-#include "../scene_forward_lights_inc.glsl"
-
-layout(location = 0) in vec2 uv_interp;
-
-layout(push_constant, std430) uniform Params {
-	uint directional_light_count;
-	float luminance_multiplier;
-	uint cluster_shift;
-	uint cluster_width;
-	uint cluster_type_size;
-	uint max_cluster_element_count_div_32;
+/* Shadow filter sample counts: filled from the shared quality getters at
+ * frame time (they are only valid after RendererSceneRenderRD::init()
+ * applies the project settings, and can change at runtime); the Forward+
+ * pipeline gets them through its specialization constants. */
+uint sc_soft_shadow_samples() {
+	return push_constant.soft_shadow_samples;
 }
-push_constant;
+
+uint sc_penumbra_shadow_samples() {
+	return push_constant.penumbra_shadow_samples;
+}
+
+uint sc_directional_soft_shadow_samples() {
+	return push_constant.directional_soft_shadow_samples;
+}
+
+uint sc_directional_penumbra_shadow_samples() {
+	return push_constant.directional_penumbra_shadow_samples;
+}
 
 layout(set = 0, binding = 1, std140) uniform DirectionalLights {
 	DirectionalLightData data[MAX_DIRECTIONAL_LIGHT_DATA_STRUCTS];
 }
 directional_lights;
+
+/* Reuse the Forward+ BRDF code directly instead of copying it, so upstream
+ * changes are picked up automatically. The material BRDF defaults match the
+ * ones the Forward+ shader compiler emits for StandardMaterial3D; the
+ * optional material features compile out through their defines; the
+ * positional-light shadow sampling functions come from the same include
+ * (the directional PSSM one from the shared include below it). */
+#define DIFFUSE_BURLEY
+#define SPECULAR_SCHLICK_GGX
+#include "../scene_forward_lights_inc.glsl"
+
+#include "../scene_forward_directional_shadow_inc.glsl"
+
+layout(location = 0) in vec2 uv_interp;
 
 /* G-buffer, filled by the geometry pass. */
 layout(set = 0, binding = 2) uniform sampler2D gbuffer_albedo;
@@ -135,14 +181,14 @@ layout(set = 0, binding = 6) uniform sampler2D depth_buffer;
 
 layout(set = 0, binding = 7) uniform sampler2D dfg;
 
-// https://google.github.io/filament/Filament.html#toc5.3.4.7
+// https://google.github.io/Filament/Filament.html#toc5.3.4.7
 // Note: We have an inverted Y-axis in the DFG; therefore, the roughness value must be inverted.
 vec2 prefiltered_dfg(float lod, float NoV) {
 	return textureLod(dfg, vec2(NoV, 1.0 - lod), 0.0).rg;
 }
 
 // Compute multiscatter compensation
-// https://google.github.io/filament/Filament.html#listing_energycompensationimpl
+// https://google.github.io/Filament/Filament.html#listing_energycompensationimpl
 vec3 get_energy_compensation(vec3 f0, float env) {
 	return 1.0 + f0 * (1.0 / env - 1.0);
 }
@@ -163,6 +209,7 @@ uint cluster_get_range_clip_mask(uint i, uint z_min, uint z_max) {
 	int mask_width = min(int(z_max) - int(z_min), 32 - local_min);
 	return bitfieldInsert(uint(0), uint(0xFFFFFFFF), local_min, mask_width);
 }
+
 
 layout(location = 0) out vec4 frag_color;
 
@@ -211,13 +258,34 @@ void main() {
 	vec2 envBRDF = prefiltered_dfg(roughness, NdotV);
 	hvec3 energy_compensation = hvec3(get_energy_compensation(vec3(f0), envBRDF.y));
 
+	// Penumbra shapes of the soft positional shadows are built from the
+	// screen-space derivatives of the fragment position, like the Forward+
+	// scene pass (vertex_ddx/vertex_ddy there).
+	vec3 vertex_ddx = dFdx(view_position);
+	vec3 vertex_ddy = dFdy(view_position);
+
 	half alpha = half(1.0);
 	for (uint i = 0u; i < push_constant.directional_light_count; i++) {
 		DirectionalLightData light = directional_lights.data[i];
-		light_compute(hvec3(normal), normalize(hvec3(light.direction)), hvec3(view_dir), half(0.0),
+		float shadow = 1.0;
+		if (light.shadow_opacity > 0.001) {
+			/* The shared Forward+ PSSM sampling (see the include above);
+			 * the G-buffer shading normal stands in for Forward+'s
+			 * geometric normal (no geometric normal in the G-buffer,
+			 * documented in the she_deferred README). */
+			shadow = forward_sample_directional_shadow(i, view_position, normal, scene_data_block.data);
+			// Distance fade (fade_from/fade_to are negative like view_position.z).
+			shadow = mix(shadow, 1.0, smoothstep(light.fade_from, light.fade_to, view_position.z));
+			// Forward+ quantizes the shadow to 8 bits through shadow0/shadow1
+			// before the lighting loop consumes it; do the same here.
+			shadow = float(uint(clamp(shadow * 255.0, 0.0, 255.0))) / 255.0;
+			shadow = mix(1.0, shadow, light.shadow_opacity);
+		}
+		float size_A = sc_use_directional_soft_shadows() ? light.size : 0.0;
+		light_compute(hvec3(normal), normalize(hvec3(light.direction)), hvec3(view_dir), half(size_A),
 				hvec3(light.color * light.energy),
 				true,
-				half(1.0) /* no shadows yet */,
+				half(shadow),
 				f0, half(roughness), half(metallic), half(light.specular),
 				hvec3(albedo),
 				alpha,
@@ -239,9 +307,6 @@ void main() {
 		uint cluster_offset = (push_constant.cluster_width * cluster_pos.y + cluster_pos.x) * (push_constant.max_cluster_element_count_div_32 + 32);
 		uint cluster_z = uint(clamp((-view_position.z / scene_data_block.data.z_far) * 32.0, 0.0, 31.0));
 
-		// Only used by soft shadows and light projectors, both stubbed off.
-		vec3 vertex_dd = vec3(0.0);
-
 		{ //omni lights
 			uint cluster_omni_offset = cluster_offset;
 
@@ -261,7 +326,7 @@ void main() {
 					mask &= ~(1u << bit);
 
 					uint light_index = 32u * i + bit;
-					light_process_omni(light_index, view_position, hvec3(view_dir), hvec3(normal), vertex_dd, vertex_dd, f0, half(roughness), half(metallic), scene_data_block.data.taa_frame_count, hvec3(albedo), alpha, uv_interp, energy_compensation,
+					light_process_omni(light_index, view_position, hvec3(view_dir), hvec3(normal), vertex_ddx, vertex_ddy, f0, half(roughness), half(metallic), scene_data_block.data.taa_frame_count, hvec3(albedo), alpha, uv_interp, energy_compensation,
 							diffuse, specular);
 				}
 			}
@@ -286,15 +351,33 @@ void main() {
 					mask &= ~(1u << bit);
 
 					uint light_index = 32u * i + bit;
-					light_process_spot(light_index, view_position, hvec3(view_dir), hvec3(normal), vertex_dd, vertex_dd, f0, half(roughness), half(metallic), scene_data_block.data.taa_frame_count, hvec3(albedo), alpha, uv_interp, energy_compensation,
+					light_process_spot(light_index, view_position, hvec3(view_dir), hvec3(normal), vertex_ddx, vertex_ddy, f0, half(roughness), half(metallic), scene_data_block.data.taa_frame_count, hvec3(albedo), alpha, uv_interp, energy_compensation,
 							diffuse, specular);
 				}
 			}
 		}
 	}
 
-	// Composition, mirroring the Forward+ opaque pass: diffuse and ambient
-	// are modulated by albedo, ao and (1 - metallic); specular by ao.
-	vec3 color = albedo * (ambient + diffuse) * ao * (1.0 - metallic) + specular * ao + emission.rgb;
+	/* Composition, mirroring the Forward+ opaque pass
+	 * (scene_forward_clustered.glsl): ambient occlusion only modulates the
+	 * ambient term (with the multi-bounce approximation when the project
+	 * setting enables it); the direct diffuse/specular terms use
+	 * mix(1.0, ao, ao_light_affect) instead, and that material parameter
+	 * (default 0) is not stored in the G-buffer: the deferred path applies no
+	 * AO on direct lighting (documented in the she_deferred README). */
+	vec3 ambient_ao;
+	if ((push_constant.feature_flags & 4u) != 0u) {
+		// Multi-bounce ambient-occlusion approximation to ambient light:
+		// https://blog.selfshadow.com/publications/s2016-shading-course/activision/s2016_pbs_activision_occlusion.pdf#page=78
+		vec3 a = vec3(2.0404) * albedo - vec3(0.3324);
+		vec3 b = vec3(-4.7951) * albedo + vec3(0.6417);
+		vec3 c = vec3(2.7552) * albedo + vec3(0.6903);
+		vec3 x = vec3(ao);
+		ambient_ao = max(x, ((x * a + b) * x + c) * x);
+	} else {
+		ambient_ao = vec3(ao);
+	}
+
+	vec3 color = albedo * (ambient * ambient_ao + diffuse) * (1.0 - metallic) + specular + emission.rgb;
 	frag_color = vec4(color * push_constant.luminance_multiplier, 1.0);
 }

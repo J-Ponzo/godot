@@ -23,9 +23,9 @@ unavoidable, and every such touch is listed below.
   intentionally and case by case (e.g. a dedicated transparent-object pass
   later), never silently. The step A "magenta render target" was the extreme
   form of this principle.
-- Sky is deliberately NOT supported yet (no harness scene needs it, and it
-  complicates `_render_scene`); it will come back as an intentional feature
-  once a sky scene enters the suite.
+- Sky is still NOT supported (step B3 scope): the harness `smoke_001` scene
+  needs a procedural sky and stays ignored in `harness/config.json` for that
+  reason; it will come back as an intentional feature once sky lands.
 - Deferred-specific limitations are tracked by the render harness
   (`harness/config.json` ignored scenes), never silently degraded.
 
@@ -64,8 +64,58 @@ unavoidable, and every such touch is listed below.
   - Not applied (no per-pixel instance data in the G-buffer): light cull masks
     vs visual instance layers, and skipping statically-baked lights on
     lightmapped instances. No harness scene in the current scope uses either.
-- **Step B3+**: shadow maps, transparent-object pass (intentional Forward+
-  reuse case), sky, GI/effects, as prioritized by the harness scenes.
+- **Step B3 (done)**: shadow maps (directional PSSM, omni cube/dual
+  paraboloid, spot).
+  - The shadow passes are rendered through the inherited `_render_shadow_passes()`,
+    the shadow subset Forward+ extracted from `_pre_opaque_render()`
+    (classification, cube shadows, directional atlas, directional/positional
+    passes; passed at the same call site so Forward+'s behavior is
+    bit-identical). They run before the deferred path refreshes the light
+    buffers, like Forward+ whose shadow passes run between its two
+    `_setup_environment()` calls, so the shadow state they mutate
+    (directional atlas rects, finalized omni cubemaps) is picked up by the
+    buffer update that feeds the shading pass. The comparison sampler is the
+    Forward+ public `shadow_sampler`.
+  - Shading side, the positional omni/spot shadows are sampled by the shared
+    `light_process_omni`/`light_process_spot` from
+    `scene_forward_lights_inc.glsl` after un-defining `SHADOWS_DISABLED`;
+    the directional PSSM sampling is the shared `forward_sample_directional_shadow()`
+    from `scene_forward_directional_shadow_inc.glsl`, extracted verbatim from
+    the Forward+ scene shader for this purpose (no copy). The deferred caller
+    keeps the distance fade and the 8-bit shadow quantization Forward+
+    applies through shadow0/shadow1. SSCS, lightmap shadowmask modes,
+    per-pixel light cull masks and vertex lighting are not part of the
+    deferred path.
+  - Specialization helpers come through the push constant at frame time:
+    the two soft-shadow flags mirror the Forward+ pipeline
+    specializations (directional: from `LightStorage::update_light_buffers()`;
+    positional: scene-global, Forward+ derives it per material instance from
+    its light lists, `uses_softshadow` == light size > 0 or area light, and
+    the per-light size checks inside the shared functions keep the result
+    identical pixel by pixel), and the four sample counts are read from the
+    shared quality getters. Frame time matters: the getters only return the
+    project settings after `RendererSceneRenderRD::init()` runs, after the
+    renderer constructors (an earlier constructor snapshot made the
+    deferred shadows single-sample sharp vs Forward+'s disk PCF - the
+    `shadows_001` cross failure).
+  - AO composition (surfaced by `texture_zoo_001`): Forward+ applies the
+    material ambient occlusion to the ambient term only, through
+    `ao = mix(1.0, ao, ao_light_affect)` for the direct diffuse/specular
+    terms (`scene_forward_clustered.glsl`, direct-light AO); the deferred
+    composition mirrors the default (ambient * ao, incl. the multi-bounce
+    approximation behind the `multi_bounce_occlusion` project setting), and
+    AO Light Affect itself is not recoverable from the G-buffer: the
+    deferred path applies no AO on direct light for materials that set it.
+  - Known parity limitation: Forward+ biases the directional sampling
+    position with the geometric (pre-normal-map) normal; the G-buffer only
+    stores the final shading normal, which is used in its place. Identical
+    for non-normal-mapped surfaces, modulo the RGBA8 normal encoding.
+    Height maps are not implemented by the deferred geometry pass yet: the
+    deep-parallax UV offsets of the material-mode pipelines differ
+    fractionally from the Forward+ main pass; `texture_zoo_001` stays
+    harness-ignored for that reason (compared via `texture_zoo_noheight_001`).
+- **Step B3+**: transparent-object pass (intentional Forward+ reuse case),
+  sky, height maps, GI/effects, as prioritized by the harness scenes.
 
 ## G-buffer layout
 
@@ -117,7 +167,9 @@ merge, re-check each entry still applies and still compiles:
 | `renderer_rd/SCsub` | +1 `SConscript("she_deferred/SCsub")` | build the renderer |
 | `renderer_rd/renderer_compositor_rd.cpp` | include + `she_deferred` branch | renderer selection |
 | `renderer_rd/shaders/SCsub` | +1 `SConscript("she_deferred/SCsub")` | build the shaders |
-| `forward_clustered/render_forward_clustered.h` | one `private:` → `protected:` section | lets `RenderSHEDeferred` reuse the Forward+ machinery instead of duplicating it |
+| `forward_clustered/render_forward_clustered.h` | one `private:` → `protected:` section; declaration of `_render_shadow_passes()` | lets `RenderSHEDeferred` reuse the Forward+ machinery instead of duplicating it |
+| `forward_clustered/render_forward_clustered.cpp` | shadow orchestration subset of `_pre_opaque_render()` extracted verbatim into `_render_shadow_passes()`, called at the same site | share the exact shadow passes with the deferred renderer; the Forward+ output must stay bit-identical (harness regression) |
+| `shaders/forward_clustered/scene_forward_clustered.glsl` | directional PSSM block (fragment, 182 lines) extracted verbatim into the new shared `shaders/scene_forward_directional_shadow_inc.glsl`, called at the same site | share the exact directional shadow sampling with the deferred lighting pass; distance fade / lightmap / SSCS stay inline |
 | `main/main.cpp` | method hints/whitelist/driver check | register the rendering method |
 | `editor/project_manager/project_dialog.cpp`, `editor/editor_node.cpp`, `editor/settings/editor_settings.cpp`, `core/config/project_settings.cpp` | `she_deferred` entries | project manager / settings / supported features / default-renderer fallback |
 
@@ -135,6 +187,17 @@ Design notes for future merges:
 - `_render_material()` (Forward+ protected virtual) is the geometry pass. If
   upstream changes its signature or its outputs, the G-buffer layout section
   above must be updated to match.
+- The shadow orchestration (`_render_shadow_passes`, extracted from
+  `_pre_opaque_render()`) and the directional PSSM sampling
+  (`scene_forward_directional_shadow_inc.glsl`, extracted from
+  `scene_forward_clustered.glsl`) are shared verbatim with Forward+; if
+  upstream restructures either area, the extraction must be re-applied on
+  the merge (both are loud: the deferred build or the bit-exact Forward+
+  regression catches a drift).
+- The lighting pass specialization helpers come through its push constant;
+  the sample counts are read from the shared quality getters at frame time
+  (valid only after `RendererSceneRenderRD::init()`), the soft-shadow flags
+  per render. Do not snapshot them at construction.
 - `LightStorage::update_light_buffers()` must be called by the deferred path
   itself (Forward+ does it in `_pre_opaque_render`, which the deferred path
   does not run).
@@ -143,11 +206,18 @@ Design notes for future merges:
   construction), both through shared data/classes (the Forward+ members are
   private).
 
-## Known limitations (B2)
+## Known limitations (B3)
 
-- Directional + clustered positional (omni/spot) lights + ambient; positional
-  light cull masks and lightmap baked-light culling are not applied (no
-  per-pixel instance data in the G-buffer).
-- No shadow maps, no GI, no volumetrics, no transparent objects, no MSAA
-  (warned once and ignored), no reflection probes / multiview (error + skip),
-  no sky (error + clear color).
+- Directional + clustered positional (omni/spot) lights + ambient, with shadow
+  maps on all three light types; positional light cull masks and lightmap
+  baked-light culling are not applied (no per-pixel instance data in the
+  G-buffer). Contact shadows are not processed.
+- Height maps are not supported by the deferred geometry pass yet: the
+  deep-parallax UV offsets of the material-mode pipelines differ fractionally
+  from the Forward+ main pass; `texture_zoo_001` stays harness-ignored
+  (compared via `texture_zoo_noheight_001`).
+- No GI, no volumetrics, no transparent objects, no MSAA (warned once and
+  ignored), no reflection probes / multiview (error + skip), no sky (error +
+  clear color).
+- The directional shadow bias uses the shading normal where Forward+ uses the
+  geometric normal (no geometric normal in the G-buffer).

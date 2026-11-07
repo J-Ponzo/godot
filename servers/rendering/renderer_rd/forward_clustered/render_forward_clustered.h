@@ -788,6 +788,14 @@ protected:
 	void _update_volumetric_fog(Ref<RenderSceneBuffersRD> p_render_buffers, RID p_environment, const Projection &p_cam_projection, const Transform3D &p_cam_transform, const Transform3D &p_prev_cam_inv_transform, RID p_shadow_atlas, int p_directional_light_count, bool p_use_directional_shadows, int p_positional_light_count, int p_voxel_gi_count, const PagedArray<RID> &p_fog_volumes);
 
 	/* Render shadows */
+	// SHEngine fork addition: moved out of _pre_opaque_render (in the same
+	// file) so the SHE-deferred renderer drives the exact same shadow
+	// orchestration (classification, cube shadows, directional atlas pass,
+	// positional shadows) instead of duplicating it. Returns whether any
+	// directional/positional shadow pass was rendered; the caller keeps
+	// responsibility for _render_shadow_end() (Forward+ runs GI between
+	// process and end).
+	bool _render_shadow_passes(RenderDataRD *p_render_data, bool p_render_gi);
 
 	void _render_shadow_pass(RID p_light, RID p_shadow_atlas, int p_pass, const PagedArray<RenderGeometryInstance *> &p_instances, float p_lod_distance_multiplier = 0, float p_screen_mesh_lod_threshold = 0.0, bool p_open_pass = true, bool p_close_pass = true, bool p_clear_region = true, RenderingServerTypes::RenderInfo *p_render_info = nullptr, const Size2i &p_viewport_size = Size2i(1, 1), const Transform3D &p_main_cam_transform = Transform3D());
 	void _render_shadow_begin();

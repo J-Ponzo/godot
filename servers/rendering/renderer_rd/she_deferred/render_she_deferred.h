@@ -63,10 +63,19 @@ namespace RendererSceneRenderImplementation {
 // cluster builder is driven by our _render_scene() (begin, update_light_buffers
 // which feeds it, bake) and the shading pass iterates its cluster buffer with
 // the shared Forward+ light processing functions.
+// Step B3: shadow maps (directional PSSM, omni cube/dual paraboloid, spot).
+// The shadow passes are rendered through the inherited Forward+
+// _render_shadow_passes() (extracted from _pre_opaque_render for this
+// purpose) and the shading pass samples the shadow atlases through the
+// shared Forward+ light processing functions and the shared directional PSSM
+// include (scene_forward_directional_shadow_inc.glsl), with the inherited
+// Forward+ comparison sampler. Shadow filter sample counts are passed
+// through the push constant, read from the shared quality getters at frame
+// time (they are only valid after RendererSceneRenderRD::init()).
 // Unsupported cases (reflection probes, multiview) fail loudly instead of
 // silently falling back to Forward+ (see the she_deferred/README.md).
-// Shadows, GI, volumetrics and transparent objects are not handled by the
-// deferred path yet.
+// GI, volumetrics and transparent objects are not handled by the deferred
+// path yet.
 class RenderSHEDeferred : public RenderForwardClustered {
 private:
 	// Step B1: fullscreen deferred lighting pass.

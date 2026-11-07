@@ -1578,10 +1578,9 @@ void RenderForwardClustered::_copy_framebuffer_to_ss_effects(Ref<RenderSceneBuff
 	ss_effects->copy_internal_texture_to_last_frame(p_render_buffers, *copy_effects);
 }
 
-void RenderForwardClustered::_pre_opaque_render(RenderDataRD *p_render_data, bool p_use_ssao, bool p_use_ssil, bool p_use_ssr, bool p_use_sscs, bool p_use_gi, const RID *p_normal_roughness_slices, RID p_voxel_gi_buffer) {
+bool RenderForwardClustered::_render_shadow_passes(RenderDataRD *p_render_data, bool p_render_gi) {
 	// Render shadows while GI is rendering, due to how barriers are handled, this should happen at the same time
 	RendererRD::LightStorage *light_storage = RendererRD::LightStorage::get_singleton();
-	RendererRD::TextureStorage *texture_storage = RendererRD::TextureStorage::get_singleton();
 
 	Ref<RenderSceneBuffersRD> rb = p_render_data->render_buffers;
 	Ref<RenderBufferDataForwardClustered> rb_data;
@@ -1589,13 +1588,6 @@ void RenderForwardClustered::_pre_opaque_render(RenderDataRD *p_render_data, boo
 		// Our forward clustered custom data buffer will only be available when we're rendering our normal view.
 		// This will not be available when rendering reflection probes.
 		rb_data = rb->get_custom_data(RB_SCOPE_FORWARD_CLUSTERED);
-	}
-
-	RENDER_TIMESTAMP("Setup Shadows");
-
-	if (rb.is_valid() && p_use_gi && rb->has_custom_data(RB_SCOPE_SDFGI)) {
-		Ref<RendererRD::GI::SDFGI> sdfgi = rb->get_custom_data(RB_SCOPE_SDFGI);
-		sdfgi->store_probes();
 	}
 
 	Size2i viewport_size = Size2i(1, 1);
@@ -1651,7 +1643,7 @@ void RenderForwardClustered::_pre_opaque_render(RenderDataRD *p_render_data, boo
 	// Render GI
 
 	bool render_shadows = p_render_data->directional_shadows.size() || p_render_data->shadows.size();
-	bool render_gi = rb.is_valid() && p_use_gi;
+	bool render_gi = p_render_gi;
 
 	if (render_shadows && render_gi) {
 		RENDER_TIMESTAMP("Render GI + Render Directional/SpotLight Shadows (Parallel)");
@@ -1676,6 +1668,41 @@ void RenderForwardClustered::_pre_opaque_render(RenderDataRD *p_render_data, boo
 
 		_render_shadow_process();
 	}
+
+	return render_shadows;
+}
+
+void RenderForwardClustered::_pre_opaque_render(RenderDataRD *p_render_data, bool p_use_ssao, bool p_use_ssil, bool p_use_ssr, bool p_use_sscs, bool p_use_gi, const RID *p_normal_roughness_slices, RID p_voxel_gi_buffer) {
+	// Render shadows while GI is rendering, due to how barriers are handled, this should happen at the same time
+	RendererRD::LightStorage *light_storage = RendererRD::LightStorage::get_singleton();
+	RendererRD::TextureStorage *texture_storage = RendererRD::TextureStorage::get_singleton();
+
+	Ref<RenderSceneBuffersRD> rb = p_render_data->render_buffers;
+	Ref<RenderBufferDataForwardClustered> rb_data;
+	if (rb.is_valid() && rb->has_custom_data(RB_SCOPE_FORWARD_CLUSTERED)) {
+		// Our forward clustered custom data buffer will only be available when we're rendering our normal view.
+		// This will not be available when rendering reflection probes.
+		rb_data = rb->get_custom_data(RB_SCOPE_FORWARD_CLUSTERED);
+	}
+
+	RENDER_TIMESTAMP("Setup Shadows");
+
+	if (rb.is_valid() && p_use_gi && rb->has_custom_data(RB_SCOPE_SDFGI)) {
+		Ref<RendererRD::GI::SDFGI> sdfgi = rb->get_custom_data(RB_SCOPE_SDFGI);
+		sdfgi->store_probes();
+	}
+
+	Size2i viewport_size = Size2i(1, 1);
+	if (rb.is_valid()) {
+		viewport_size = rb->get_internal_size();
+	}
+
+	// SHEngine fork addition: the shadow orchestration (classification, cube
+	// shadows, directional atlas, directional/positional passes) moved into
+	// _render_shadow_passes so the SHE-deferred renderer drives the exact
+	// same code; shadow end stays here (GI must run between process and end).
+	bool render_shadows = _render_shadow_passes(p_render_data, rb.is_valid() && p_use_gi);
+	bool render_gi = rb.is_valid() && p_use_gi;
 
 	if (render_gi) {
 		gi.process_gi(rb, p_normal_roughness_slices, p_voxel_gi_buffer, p_render_data->environment, p_render_data->scene_data->view_count, p_render_data->scene_data->view_projection, p_render_data->scene_data->view_eye_offset, p_render_data->scene_data->cam_transform, *p_render_data->voxel_gi_instances);
