@@ -76,7 +76,7 @@ bake framebuffer of `RendererSceneRenderRD::bake_render_uv2` exactly:
 
 | Texture                   | Format   | Contents                                        |
 |---------------------------|----------|-------------------------------------------------|
-| `gbuffer_albedo`          | RGBA8    | albedo.rgb, alpha                               |
+| `gbuffer_albedo`          | RGBA16F  | albedo.rgb, alpha                               |
 | `gbuffer_normal`          | RGBA8    | 24-bit encoded view-space normal in rgb, a unused |
 | `gbuffer_orm`             | RGBA8    | ao (r), roughness (g), metallic (b), sss (a)    |
 | `gbuffer_emission`        | RGBA16F  | emission.rgb                                    |
@@ -93,9 +93,19 @@ Encoding notes:
 - Normals, directional light data and the lighting math are in view space,
   like everything in the Forward+ shaders. Data is linear end to end; the
   sRGB conversion only happens in the inherited post-process.
-- RGBA8 precision for albedo/normal/ORM is the B1 starting point
-  (`normal_map_001` and `brdf_chart_001` are the precision oracles); formats
-  can be widened per-texture without changing the pass structure.
+- RGBA8 precision for normal/ORM is the B1 starting point (`normal_map_001`
+  and `brdf_chart_001` are the precision oracles); formats can be widened
+  per-texture without changing the pass structure.
+- `gbuffer_albedo` was widened to RGBA16F after the
+  `lights_many_directional_001` cross investigation: mid-gray albedo values
+  (0.5/0.55 sit exactly between two UNORM8 levels, 127.5 -> 128) shift lit
+  output by ~2/255 on broad surfaces, which alone failed the default cross
+  ssim threshold (0.9952 vs 0.999; rmse was passing with margin). Widening
+  the albedo only passes all in-scope scenes with the strict defaults
+  (ssim >= 0.9998). The normal and ORM textures were bisected too:
+  widening the normal made the razor-thin grazing specular flash of
+  `brdf_chart_001` *worse* (max 10 -> 13), so keep them at RGBA8 unless a
+  future scene justifies revisiting.
 
 ## Upstream files touched (sync checklist)
 

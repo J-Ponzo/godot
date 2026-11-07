@@ -41,7 +41,10 @@ namespace RendererSceneRenderImplementation {
 // Layout (see she_deferred/README.md): the geometry pass reuses the Forward+
 // material-mode pipelines (MODE_RENDER_MATERIAL), so the G-buffer mirrors the
 // bake framebuffer of RendererSceneRenderRD::bake_render_uv2 exactly:
-// - "gbuffer_albedo"   RGBA8: albedo.rgb, alpha.
+// - "gbuffer_albedo"   RGBA16F: albedo.rgb, alpha. Widened from the bake RGBA8
+//   starting point: mid-gray albedo values (e.g. 0.5/0.55, exactly between two
+//   UNORM8 levels) shift by ~2/255 with 8-bit storage, which fails the cross
+//   ssim threshold on broad lit surfaces (lights_many_directional_001).
 // - "gbuffer_normal"   RGBA8: 24-bit encoded normal in rgb, a unused.
 // - "gbuffer_orm"      RGBA8: ao (r), roughness (g), metallic (b), sss (a).
 // - "gbuffer_emission" RGBA16F: emission.rgb.
@@ -56,6 +59,10 @@ private:
 public:
 	static RD::DataFormat get_gbuffer_format() {
 		return RD::DATA_FORMAT_R8G8B8A8_UNORM;
+	}
+
+	static RD::DataFormat get_gbuffer_albedo_format() {
+		return RD::DATA_FORMAT_R16G16B16A16_SFLOAT;
 	}
 
 	static RD::DataFormat get_gbuffer_emission_format() {

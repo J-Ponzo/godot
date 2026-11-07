@@ -39,7 +39,7 @@ void RenderBufferDataSHEDeferred::ensure_gbuffer() {
 
 	if (!has_gbuffer()) {
 		bool msaa = render_buffers->get_msaa_3d() != RSE::VIEWPORT_MSAA_DISABLED;
-		render_buffers->create_texture(RB_SCOPE_SHE_DEFERRED, RB_TEX_GB_ALBEDO, get_gbuffer_format(), get_gbuffer_usage_bits(msaa, render_buffers->get_can_be_storage()));
+		render_buffers->create_texture(RB_SCOPE_SHE_DEFERRED, RB_TEX_GB_ALBEDO, get_gbuffer_albedo_format(), get_gbuffer_usage_bits(msaa, render_buffers->get_can_be_storage()));
 		render_buffers->create_texture(RB_SCOPE_SHE_DEFERRED, RB_TEX_GB_NORMAL, get_gbuffer_format(), get_gbuffer_usage_bits(msaa, render_buffers->get_can_be_storage()));
 		render_buffers->create_texture(RB_SCOPE_SHE_DEFERRED, RB_TEX_GB_ORM, get_gbuffer_format(), get_gbuffer_usage_bits(msaa, render_buffers->get_can_be_storage()));
 		render_buffers->create_texture(RB_SCOPE_SHE_DEFERRED, RB_TEX_GB_EMISSION, get_gbuffer_emission_format(), get_gbuffer_usage_bits(msaa, render_buffers->get_can_be_storage()));
