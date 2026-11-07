@@ -44,7 +44,6 @@ void RenderBufferDataSHEDeferred::ensure_gbuffer() {
 		render_buffers->create_texture(RB_SCOPE_SHE_DEFERRED, RB_TEX_GB_ORM, get_gbuffer_format(), get_gbuffer_usage_bits(msaa, render_buffers->get_can_be_storage()));
 		render_buffers->create_texture(RB_SCOPE_SHE_DEFERRED, RB_TEX_GB_EMISSION, get_gbuffer_emission_format(), get_gbuffer_usage_bits(msaa, render_buffers->get_can_be_storage()));
 		render_buffers->create_texture(RB_SCOPE_SHE_DEFERRED, RB_TEX_GB_DEPTH, get_gbuffer_depth_format(), get_gbuffer_usage_bits(msaa, render_buffers->get_can_be_storage()));
-		render_buffers->create_texture(RB_SCOPE_SHE_DEFERRED, RB_TEX_GB_DEPTH_ATTACHMENT, RenderSceneBuffersRD::get_depth_format(false, msaa, render_buffers->get_can_be_storage()), RenderSceneBuffersRD::get_depth_usage_bits(false, msaa, render_buffers->get_can_be_storage()) | RD::TEXTURE_USAGE_SAMPLING_BIT);
 	}
 }
 
@@ -96,20 +95,16 @@ RID RenderBufferDataSHEDeferred::get_depth_color() const {
 	return render_buffers->get_texture(RB_SCOPE_SHE_DEFERRED, RB_TEX_GB_DEPTH);
 }
 
-RID RenderBufferDataSHEDeferred::get_depth_attachment() const {
-	ERR_FAIL_COND_V(!render_buffers, RID());
-	return render_buffers->get_texture(RB_SCOPE_SHE_DEFERRED, RB_TEX_GB_DEPTH_ATTACHMENT);
-}
-
 RID RenderBufferDataSHEDeferred::get_gbuffer_fb() {
 	ERR_FAIL_NULL_V(render_buffers, RID());
 	ensure_gbuffer();
 
-	// The deferred geometry pass uses its own depth attachment: it renders
-	// through the inherited Forward+ material pass, whose projection is not
-	// flip_y-corrected like the main pass, so the shared base depth buffer
-	// must not be written.
-	return FramebufferCacheRD::get_singleton()->get_cache_multiview(render_buffers->get_view_count(), get_albedo(), get_normal(), get_orm(), get_emission(), get_depth_color(), get_depth_attachment());
+	// The geometry pass renders with the main camera projection (flip_y
+	// corrected, see render_she_deferred.cpp), so its depth attachment is the
+	// shared base depth buffer: the depth written alongside the G-buffer is
+	// then valid for every consumer of the main-pass depth (the shading pass,
+	// and later the Forward+ transparent pass reused for transparency).
+	return FramebufferCacheRD::get_singleton()->get_cache_multiview(render_buffers->get_view_count(), get_albedo(), get_normal(), get_orm(), get_emission(), get_depth_color(), render_buffers->get_depth_texture());
 }
 
 } // namespace RendererSceneRenderImplementation

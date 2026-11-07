@@ -37,9 +37,20 @@ unavoidable, and every such touch is listed below.
   allocates the deferred textures for every configured render buffers.
 - **Step B1 (done)**: deferred core passes.
   - Geometry pass: opaque meshes rendered into the G-buffer by reusing the
-    Forward+ material-mode pipelines (`_render_material`, MODE_RENDER_MATERIAL)
-    through inheritance. No surface shader duplication: the upstream material
-    shader already writes albedo/normal/ORM/emission/view-space depth.
+    Forward+ material-mode pipelines (MODE_RENDER_MATERIAL). No surface shader
+    duplication: the upstream material shader already writes
+    albedo/normal/ORM/emission/view-space depth. The pass is orchestrated by
+    `RenderSHEDeferred::_render_scene()` itself (the same inherited pieces as
+    the upstream `_render_material()` helper: `_setup_environment()`,
+    `_fill_render_list(RENDER_LIST_SECONDARY, ..., PASS_MODE_DEPTH_MATERIAL)`,
+    `_render_list_with_draw_list()`), but with the real render data instead of
+    the helper's own local scene data: the geometry is rasterized with the main
+    camera projection (flip_y corrected), so the G-buffer and the shared base
+    depth buffer written alongside it are in main-pass orientation, with the
+    same depth conventions as every Forward+ pass (reversed-Z,
+    `COMPARE_OP_GREATER_OR_EQUAL`, clear 0.0). This is what will let a reused
+    Forward+ transparent pass depth-test against that buffer as-is, with no
+    depth copy/flip pass and no extra depth texture.
   - Shading pass (`she_deferred_lighting.glsl`, the only new GLSL): fullscreen
     pass reading the G-buffer, applying ambient + directional light
     contributions (Forward+ `light_compute`, incl. Burley diffuse, Schlick-GGX
@@ -110,36 +121,43 @@ unavoidable, and every such touch is listed below.
     position with the geometric (pre-normal-map) normal; the G-buffer only
     stores the final shading normal, which is used in its place. Identical
     for non-normal-mapped surfaces, modulo the RGBA8 normal encoding.
-    Height maps are not implemented by the deferred geometry pass yet: the
-    deep-parallax UV offsets of the material-mode pipelines differ
-    fractionally from the Forward+ main pass; `texture_zoo_001` stays
-    harness-ignored for that reason (compared via `texture_zoo_noheight_001`).
+  - Height maps (deep parallax) come with the material-mode pipelines and
+    now match the Forward+ main pass: the residue that used to keep
+    `texture_zoo_001` harness-ignored was the old geometry pass's
+    un-flip_y-corrected projection, gone since the pass renders with the
+    main camera data (cross rmse=0.1324, max_delta=5, strict defaults,
+    evidence in harness/KNOWN_ISSUES.md).
 - **Step B3+**: transparent-object pass (intentional Forward+ reuse case),
-  sky, height maps, GI/effects, as prioritized by the harness scenes.
+  sky, GI/effects, as prioritized by the harness scenes.
 
 ## G-buffer layout
 
 Owned by `RenderBufferDataSHEDeferred`, allocated under the
 `RB_SCOPE_SHE_DEFERRED` context of `RenderSceneBuffersRD`. The geometry pass
-goes through the Forward+ material-mode pipelines, so the layout mirrors the
-bake framebuffer of `RendererSceneRenderRD::bake_render_uv2` exactly:
+goes through the Forward+ material-mode pipelines, so the color layout
+mirrors the bake framebuffer of `RendererSceneRenderRD::bake_render_uv2`:
 
-| Texture                   | Format   | Contents                                        |
-|---------------------------|----------|-------------------------------------------------|
-| `gbuffer_albedo`          | RGBA16F  | albedo.rgb, alpha                               |
-| `gbuffer_normal`          | RGBA8    | 24-bit encoded view-space normal in rgb, a unused |
-| `gbuffer_orm`             | RGBA8    | ao (r), roughness (g), metallic (b), sss (a)    |
-| `gbuffer_emission`        | RGBA16F  | emission.rgb                                    |
-| `gbuffer_depth`           | R32F     | view-space linear depth (-vertex.z)             |
-| `gbuffer_depth_attachment`| D32/X8D24| deferred depth (z-test for the geometry pass)    |
+| Texture             | Format   | Contents                                          |
+|---------------------|----------|---------------------------------------------------|
+| `gbuffer_albedo`    | RGBA16F  | albedo.rgb, alpha                                 |
+| `gbuffer_normal`    | RGBA8    | 24-bit encoded view-space normal in rgb, a unused |
+| `gbuffer_orm`       | RGBA8    | ao (r), roughness (g), metallic (b), sss (a)      |
+| `gbuffer_emission`  | RGBA16F  | emission.rgb                                      |
+| `gbuffer_depth`     | R32F     | view-space linear depth (-vertex.z); mandatory 5th sink attachment of the material pipelines, never read back |
+
+The depth attachment of the geometry-pass framebuffer is the shared base
+depth buffer (`rb->get_depth_texture()`, D32/X8D24), not a deferred-owned
+texture: the pass rasterizes with the main camera projection, so that depth
+is valid for every consumer of the main-pass depth (the shading pass samples
+it for position reconstruction, a reused Forward+ transparent pass will
+depth-test against it). Reversed-Z, like every pass of this engine.
 
 Encoding notes:
 
-- The G-buffer is filled through the inherited `_render_material()` whose
-  projection is not flip_y-corrected (unlike the main pass), so the whole
-  G-buffer is vertically flipped: the shading pass samples with the Y axis
-  inverted. The shared base depth buffer is deliberately NOT written by the
-  geometry pass.
+- The G-buffer is filled through the Forward+ material-mode pipelines driven
+  with the main camera data (flip_y corrected), so it is in main-pass
+  orientation: the shading pass samples the render targets directly, with no
+  Y mirroring to undo.
 - Normals, directional light data and the lighting math are in view space,
   like everything in the Forward+ shaders. Data is linear end to end; the
   sRGB conversion only happens in the inherited post-process.
@@ -167,7 +185,7 @@ merge, re-check each entry still applies and still compiles:
 | `renderer_rd/SCsub` | +1 `SConscript("she_deferred/SCsub")` | build the renderer |
 | `renderer_rd/renderer_compositor_rd.cpp` | include + `she_deferred` branch | renderer selection |
 | `renderer_rd/shaders/SCsub` | +1 `SConscript("she_deferred/SCsub")` | build the shaders |
-| `forward_clustered/render_forward_clustered.h` | one `private:` → `protected:` section; declaration of `_render_shadow_passes()` | lets `RenderSHEDeferred` reuse the Forward+ machinery instead of duplicating it |
+| `forward_clustered/render_forward_clustered.h` | one `private:` → `protected:` section; declaration of `_render_shadow_passes()`; the `RenderListType` enum exposed `protected` | lets `RenderSHEDeferred` reuse the Forward+ machinery (incl. driving the material-mode geometry pass itself) instead of duplicating it |
 | `forward_clustered/render_forward_clustered.cpp` | shadow orchestration subset of `_pre_opaque_render()` extracted verbatim into `_render_shadow_passes()`, called at the same site | share the exact shadow passes with the deferred renderer; the Forward+ output must stay bit-identical (harness regression) |
 | `shaders/forward_clustered/scene_forward_clustered.glsl` | directional PSSM block (fragment, 182 lines) extracted verbatim into the new shared `shaders/scene_forward_directional_shadow_inc.glsl`, called at the same site | share the exact directional shadow sampling with the deferred lighting pass; distance fade / lightmap / SSCS stay inline |
 | `main/main.cpp` | method hints/whitelist/driver check | register the rendering method |
@@ -184,9 +202,15 @@ Design notes for future merges:
   adds new bindings referenced by that include, the build fails and the new
   declaration + uniform binding must be added (most are shared storages
   with public getters).
-- `_render_material()` (Forward+ protected virtual) is the geometry pass. If
-  upstream changes its signature or its outputs, the G-buffer layout section
-  above must be updated to match.
+- The geometry pass reuses the Forward+ material-mode pipelines
+  (`PASS_MODE_DEPTH_MATERIAL`) driven by `RenderSHEDeferred::_render_scene()`
+  itself (not the upstream `_render_material()` helper, whose local scene data
+  is not flip_y-corrected - using it also committed the G-buffer to a vertical
+  mirror and a deferred-owned depth copy). If upstream changes the material
+  shader's outputs, the G-buffer layout section above must be updated to
+  match; if it changes `_fill_render_list`/`_render_list` plumbing or
+  `_setup_environment()`, the deferred geometry pass follows it through the
+  shared calls (loud at build time through the same signatures).
 - The shadow orchestration (`_render_shadow_passes`, extracted from
   `_pre_opaque_render()`) and the directional PSSM sampling
   (`scene_forward_directional_shadow_inc.glsl`, extracted from
@@ -212,10 +236,11 @@ Design notes for future merges:
   maps on all three light types; positional light cull masks and lightmap
   baked-light culling are not applied (no per-pixel instance data in the
   G-buffer). Contact shadows are not processed.
-- Height maps are not supported by the deferred geometry pass yet: the
-  deep-parallax UV offsets of the material-mode pipelines differ fractionally
-  from the Forward+ main pass; `texture_zoo_001` stays harness-ignored
-  (compared via `texture_zoo_noheight_001`).
+- Height maps (deep parallax) are supported through the material-mode
+  pipelines: since the geometry pass renders with the main camera data,
+  the parallax inputs match the Forward+ main pass and `texture_zoo_001`
+  passes the strict cross defaults (rmse 0.1324, max_delta 5; evidence in
+  harness/KNOWN_ISSUES.md).
 - No GI, no volumetrics, no transparent objects, no MSAA (warned once and
   ignored), no reflection probes / multiview (error + skip), no sky (error +
   clear color).

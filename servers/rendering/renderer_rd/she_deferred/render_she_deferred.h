@@ -42,7 +42,6 @@
 #define RB_TEX_GB_ORM SNAME("gbuffer_orm")
 #define RB_TEX_GB_EMISSION SNAME("gbuffer_emission")
 #define RB_TEX_GB_DEPTH SNAME("gbuffer_depth")
-#define RB_TEX_GB_DEPTH_ATTACHMENT SNAME("gbuffer_depth_attachment")
 
 namespace RendererSceneRenderImplementation {
 
@@ -55,8 +54,13 @@ namespace RendererSceneRenderImplementation {
 //
 // Step B1: deferred for opaque geometry.
 // - Geometry pass: reuses the Forward+ material-mode pipelines
-//   (MODE_RENDER_MATERIAL) through the inherited _render_material() to fill
-//   the G-buffer (albedo, normal, ORM, emission, view-space depth).
+//   (MODE_RENDER_MATERIAL) to fill the G-buffer (albedo, normal, ORM,
+//   emission, view-space depth), orchestrated by this class with the real
+//   render data (main camera projection, flip_y corrected) so the G-buffer
+//   and the shared base depth buffer written alongside it are in main-pass
+//   orientation, like the Forward+ passes (no vertical mirror to undo in
+//   the shading pass, and a Forward+ transparent pass can depth-test
+//   against that depth buffer as-is).
 // - Shading pass: fullscreen pass applying ambient and directional light
 //   contributions to the G-buffer, into the HDR color buffer.
 // Step B2: clustered positional lights (omni/spot). The inherited Forward+

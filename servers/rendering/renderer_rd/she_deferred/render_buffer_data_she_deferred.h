@@ -39,8 +39,7 @@ namespace RendererSceneRenderImplementation {
 // renderer. Owns the G-buffer textures used by the deferred geometry pass.
 //
 // Layout (see she_deferred/README.md): the geometry pass reuses the Forward+
-// material-mode pipelines (MODE_RENDER_MATERIAL), so the G-buffer mirrors the
-// bake framebuffer of RendererSceneRenderRD::bake_render_uv2 exactly:
+// material-mode pipelines (MODE_RENDER_MATERIAL):
 // - "gbuffer_albedo"   RGBA16F: albedo.rgb, alpha. Widened from the bake RGBA8
 //   starting point: mid-gray albedo values (e.g. 0.5/0.55, exactly between two
 //   UNORM8 levels) shift by ~2/255 with 8-bit storage, which fails the cross
@@ -48,8 +47,12 @@ namespace RendererSceneRenderImplementation {
 // - "gbuffer_normal"   RGBA8: 24-bit encoded normal in rgb, a unused.
 // - "gbuffer_orm"      RGBA8: ao (r), roughness (g), metallic (b), sss (a).
 // - "gbuffer_emission" RGBA16F: emission.rgb.
-// - "gbuffer_depth"    R32F: view-space linear depth (-vertex.z).
-// - depth: the shared base depth buffer (depth attachment of the framebuffer).
+// - "gbuffer_depth"    R32F: view-space linear depth (-vertex.z). Mandatory
+//   5th sink attachment of the material-mode pipelines, never read back.
+// - depth attachment: the shared base depth buffer (rb->get_depth_texture()),
+//   written by the geometry pass under the main camera projection, in the
+//   same conventions as the Forward+ passes, so the shading pass and the
+//   future transparent pass can read it directly (see README.md).
 class RenderBufferDataSHEDeferred : public RenderBufferCustomDataRD {
 	GDCLASS(RenderBufferDataSHEDeferred, RenderBufferCustomDataRD)
 
@@ -87,11 +90,10 @@ public:
 	RID get_orm() const;
 	RID get_emission() const;
 	RID get_depth_color() const;
-	RID get_depth_attachment() const;
 
 	// Framebuffer with the [albedo, normal, orm, emission, depth_color] color
-	// attachments plus the deferred depth attachment, used by the deferred
-	// geometry pass.
+	// attachments plus the shared base depth buffer as depth attachment,
+	// used by the deferred geometry pass.
 	RID get_gbuffer_fb();
 };
 

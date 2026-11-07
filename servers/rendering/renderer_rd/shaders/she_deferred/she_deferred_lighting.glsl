@@ -214,21 +214,19 @@ uint cluster_get_range_clip_mask(uint i, uint z_min, uint z_max) {
 layout(location = 0) out vec4 frag_color;
 
 void main() {
-	/* The G-buffer is filled through the inherited Forward+ material pass,
-	 * whose projection is not flip_y corrected (unlike the main pass), so the
-	 * G-buffer is vertically flipped: sample with the Y axis inverted. */
-	vec2 gb_uv = vec2(uv_interp.x, 1.0 - uv_interp.y);
-
-	float depth = texture(depth_buffer, gb_uv).r;
+	/* The G-buffer is filled through the Forward+ material-mode pipelines
+	 * driven with the main camera data (see render_she_deferred.cpp), so it
+	 * is in main-pass orientation: sample the render targets directly. */
+	float depth = texture(depth_buffer, uv_interp).r;
 	if (depth == 0.0) {
 		// Background: leave the clear color (or sky) behind.
 		discard;
 	}
 
-	vec4 albedo_alpha = texture(gbuffer_albedo, gb_uv);
-	vec4 normal_encoded = texture(gbuffer_normal, gb_uv);
-	vec4 orm = texture(gbuffer_orm, gb_uv);
-	vec4 emission = texture(gbuffer_emission, gb_uv);
+	vec4 albedo_alpha = texture(gbuffer_albedo, uv_interp);
+	vec4 normal_encoded = texture(gbuffer_normal, uv_interp);
+	vec4 orm = texture(gbuffer_orm, uv_interp);
+	vec4 emission = texture(gbuffer_emission, uv_interp);
 
 	vec3 albedo = albedo_alpha.rgb;
 	// The G-buffer normal and the directional light data are in view space,

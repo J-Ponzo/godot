@@ -93,6 +93,12 @@ void RenderSHEDeferred::ensure_lighting_luts() {
 }
 
 void RenderSHEDeferred::_render_scene(RenderDataRD *p_render_data, const Color &p_default_bg_color) {
+	// Every _setup_environment() call (the shadow passes below, the geometry
+	// pass) takes a scene uniform buffer from the pool indexed by this
+	// counter, so reset it at the start of the render like
+	// RenderForwardClustered::_render_scene() does.
+	scene_state.used_uniform_buffer_count = 0;
+
 	Ref<RenderSceneBuffersRD> rb = p_render_data->render_buffers;
 	ERR_FAIL_COND(rb.is_null());
 
@@ -155,6 +161,14 @@ void RenderSHEDeferred::_render_scene(RenderDataRD *p_render_data, const Color &
 	// _setup_environment() that follows _pre_opaque_render().
 	current_cluster_builder->begin(p_render_data->scene_data->cam_transform, p_render_data->scene_data->cam_projection, true);
 
+	// Mirror the Forward+ _pre_opaque_render() cluster bookkeeping on the
+	// render data: _setup_environment() (below, from the geometry pass)
+	// computes cluster layout parameters from these fields like the Forward+
+	// passes do.
+	p_render_data->cluster_buffer = current_cluster_builder->get_cluster_buffer();
+	p_render_data->cluster_size = current_cluster_builder->get_cluster_size();
+	p_render_data->cluster_max_elements = current_cluster_builder->get_max_cluster_elements();
+
 	// Update the light buffers (directional light data + count, positional
 	// shadow matrices). Forward+ does this in _setup_environment(), which
 	// the deferred path does not run.
@@ -196,7 +210,36 @@ void RenderSHEDeferred::_render_scene(RenderDataRD *p_render_data, const Color &
 
 	// Geometry pass: fill the G-buffer reusing the Forward+ material-mode
 	// pipelines (albedo, normal, ORM, emission, view-space depth + depth).
-	_render_material(p_render_data->scene_data->cam_transform, p_render_data->scene_data->cam_projection, p_render_data->scene_data->cam_orthogonal, *p_render_data->instances, rb_data->get_gbuffer_fb(), Rect2i(), 1.0);
+	// It orchestrates the same inherited pieces as the upstream
+	// _render_material() helper (which the deferred path used until now),
+	// but with the real render data instead of that helper's own local
+	// (non-flip_y-corrected) scene data: the geometry is rasterized with the
+	// main camera projection, so the G-buffer and the shared base depth
+	// buffer it writes are in main-pass orientation, like the Forward+
+	// passes (the shading pass samples them unmirrored, and a Forward+
+	// transparent pass can depth-test against that buffer as-is).
+	enable_features(FEATURE_ADVANCED_BIT);
+	_update_render_base_uniform_set();
+
+	uint32_t gbuffer_uniform_buffer_index = _setup_environment(p_render_data, false, screen_size, screen_size, p_default_bg_color, false);
+
+	_fill_render_list(RENDER_LIST_SECONDARY, p_render_data, PASS_MODE_DEPTH_MATERIAL);
+	render_list[RENDER_LIST_SECONDARY].sort_by_key();
+	_fill_instance_data(RENDER_LIST_SECONDARY);
+
+	RID rp_uniform_set = _setup_render_pass_uniform_set(RENDER_LIST_SECONDARY, nullptr, false, RID(), RendererRD::MaterialStorage::get_singleton()->samplers_rd_get_default(), gbuffer_uniform_buffer_index);
+
+	{
+		RenderListParameters render_list_params(render_list[RENDER_LIST_SECONDARY].elements.ptr(), render_list[RENDER_LIST_SECONDARY].element_info.ptr(), render_list[RENDER_LIST_SECONDARY].elements.size(), true, PASS_MODE_DEPTH_MATERIAL, 0, true, false, rp_uniform_set);
+		Vector<Color> clear = {
+			Color(0.0, 0.0, 0.0, 0), // Albedo.
+			Color(0.0, 0.0, 0.0, 0), // Normal.
+			Color(0.0, 0.0, 0.0, 0), // ORM.
+			Color(0.0, 0.0, 0.0, 0), // Emission.
+			Color(0.0, 0.0, 0.0, 0), // View-space depth (sink attachment).
+		};
+		_render_list_with_draw_list(&render_list_params, rb_data->get_gbuffer_fb(), RD::DRAW_CLEAR_ALL, clear, 0.0f, 0u, Rect2());
+	}
 
 	RD::get_singleton()->draw_command_end_label();
 
@@ -273,7 +316,7 @@ void RenderSHEDeferred::_render_scene(RenderDataRD *p_render_data, const Color &
 				RD::Uniform(RD::UNIFORM_TYPE_SAMPLER_WITH_TEXTURE, 3, Vector<RID>({ default_sampler, rb_data->get_normal() })),
 				RD::Uniform(RD::UNIFORM_TYPE_SAMPLER_WITH_TEXTURE, 4, Vector<RID>({ default_sampler, rb_data->get_orm() })),
 				RD::Uniform(RD::UNIFORM_TYPE_SAMPLER_WITH_TEXTURE, 5, Vector<RID>({ default_sampler, rb_data->get_emission() })),
-				RD::Uniform(RD::UNIFORM_TYPE_SAMPLER_WITH_TEXTURE, 6, Vector<RID>({ default_sampler, rb_data->get_depth_attachment() })),
+				RD::Uniform(RD::UNIFORM_TYPE_SAMPLER_WITH_TEXTURE, 6, Vector<RID>({ default_sampler, rb->get_depth_texture() })),
 				RD::Uniform(RD::UNIFORM_TYPE_SAMPLER_WITH_TEXTURE, 7, Vector<RID>({ default_sampler, dfg_texture })),
 				RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 8, RendererRD::LightStorage::get_singleton()->get_omni_light_buffer()),
 				RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 9, RendererRD::LightStorage::get_singleton()->get_spot_light_buffer()),

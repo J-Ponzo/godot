@@ -75,6 +75,7 @@ class RenderForwardClustered : public RendererSceneRenderRD {
 		INSTANCE_DATA_BUFFER_MIN_SIZE = 4096
 	};
 
+protected: // SHEngine fork addition: the SHE-deferred renderer drives the material-mode geometry pass itself, so it needs to name the render lists.
 	enum RenderListType {
 		RENDER_LIST_OPAQUE, //used for opaque objects
 		RENDER_LIST_MOTION, //used for opaque objects with motion
@@ -83,6 +84,7 @@ class RenderForwardClustered : public RendererSceneRenderRD {
 		RENDER_LIST_MAX
 	};
 
+private:
 	/* Scene Shader */
 
 	SceneShaderForwardClustered scene_shader;
