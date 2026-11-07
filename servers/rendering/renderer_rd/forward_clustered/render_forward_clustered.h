@@ -59,6 +59,13 @@ namespace RendererSceneRenderImplementation {
 
 class RenderForwardClustered : public RendererSceneRenderRD {
 	friend SceneShaderForwardClustered;
+	// SHEngine fork addition: the SHE-deferred renderer (RenderSHEDeferred, in
+	// she_deferred/) subclasses this renderer and reuses its private machinery
+	// instead of duplicating it (render lists, environment setup, scene shader,
+	// render buffer data, the extracted _render_shadow_passes). Friendship
+	// grants exactly that one class access, additively - no upstream
+	// visibility section is modified.
+	friend class RenderSHEDeferred;
 
 	enum {
 		SCENE_UNIFORM_SET = 0,
@@ -75,7 +82,6 @@ class RenderForwardClustered : public RendererSceneRenderRD {
 		INSTANCE_DATA_BUFFER_MIN_SIZE = 4096
 	};
 
-protected: // SHEngine fork addition: the SHE-deferred renderer drives the material-mode geometry pass itself, so it needs to name the render lists.
 	enum RenderListType {
 		RENDER_LIST_OPAQUE, //used for opaque objects
 		RENDER_LIST_MOTION, //used for opaque objects with motion
@@ -84,7 +90,6 @@ protected: // SHEngine fork addition: the SHE-deferred renderer drives the mater
 		RENDER_LIST_MAX
 	};
 
-private:
 	/* Scene Shader */
 
 	SceneShaderForwardClustered scene_shader;
@@ -170,11 +175,7 @@ public:
 		static uint32_t get_voxelgi_usage_bits(bool p_resolve, bool p_msaa, bool p_storage);
 	};
 
-// SHEngine fork addition: this section is protected instead of private so the
-// SHE-deferred renderer (RenderSHEDeferred) can reuse the Forward+ machinery
-// (render lists, environment setup, scene shader, buffer data) instead of
-// duplicating it.
-protected:
+private:
 	virtual void setup_render_buffer_data(Ref<RenderSceneBuffersRD> p_render_buffers) override;
 
 	RID render_base_uniform_set;

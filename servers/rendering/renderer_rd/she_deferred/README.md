@@ -185,7 +185,7 @@ merge, re-check each entry still applies and still compiles:
 | `renderer_rd/SCsub` | +1 `SConscript("she_deferred/SCsub")` | build the renderer |
 | `renderer_rd/renderer_compositor_rd.cpp` | include + `she_deferred` branch | renderer selection |
 | `renderer_rd/shaders/SCsub` | +1 `SConscript("she_deferred/SCsub")` | build the shaders |
-| `forward_clustered/render_forward_clustered.h` | one `private:` → `protected:` section; declaration of `_render_shadow_passes()`; the `RenderListType` enum exposed `protected` | lets `RenderSHEDeferred` reuse the Forward+ machinery (incl. driving the material-mode geometry pass itself) instead of duplicating it |
+| `forward_clustered/render_forward_clustered.h` | `friend class RenderSHEDeferred;` next to upstream's own `friend SceneShaderForwardClustered;`; declaration of `_render_shadow_passes()` (stays private, called through friendship) | lets `RenderSHEDeferred` reuse the Forward+ machinery (incl. driving the material-mode geometry pass itself) instead of duplicating it; purely additive, no upstream visibility section is modified |
 | `forward_clustered/render_forward_clustered.cpp` | shadow orchestration subset of `_pre_opaque_render()` extracted verbatim into `_render_shadow_passes()`, called at the same site | share the exact shadow passes with the deferred renderer; the Forward+ output must stay bit-identical (harness regression) |
 | `shaders/forward_clustered/scene_forward_clustered.glsl` | directional PSSM block (fragment, 182 lines) extracted verbatim into the new shared `shaders/scene_forward_directional_shadow_inc.glsl`, called at the same site | share the exact directional shadow sampling with the deferred lighting pass; distance fade / lightmap / SSCS stay inline |
 | `main/main.cpp` | method hints/whitelist/driver check | register the rendering method |
@@ -193,6 +193,14 @@ merge, re-check each entry still applies and still compiles:
 
 Design notes for future merges:
 
+- `RenderSHEDeferred` reaches the Forward+ machinery through a single
+  `friend class RenderSHEDeferred;` declaration in the Forward+ header,
+  **not** through `private:` → `protected:` conversions: friendship is
+  purely additive (an isolated insertion, trivially mergeable), grants
+  access to exactly one class instead of every subclass, and covers future
+  upstream private additions without touching the upstream file again.
+  Consequence: the code review (not the diff) is the barrier — only depend
+  on what these design notes say the deferred path uses.
 - The Forward+ BRDF/light code is `#include`-d (not copied): if upstream
   renames or restructures `scene_forward_lights_inc.glsl`, our include breaks
   at build time (loud, fix by updating one include). The include requires a
