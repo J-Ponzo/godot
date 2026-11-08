@@ -216,21 +216,84 @@ void RenderSHEDeferred::_render_scene(RenderDataRD *p_render_data, const Color &
 	// (non-flip_y-corrected) scene data: the geometry is rasterized with the
 	// main camera projection, so the G-buffer and the shared base depth
 	// buffer it writes are in main-pass orientation, like the Forward+
-	// passes (the shading pass samples them unmirrored, and a Forward+
-	// transparent pass can depth-test against that buffer as-is).
+	// passes (the shading pass samples them unmirrored, and the transparent
+	// pass below depth-tests against that buffer as-is).
 	enable_features(FEATURE_ADVANCED_BIT);
 	_update_render_base_uniform_set();
 
 	uint32_t gbuffer_uniform_buffer_index = _setup_environment(p_render_data, false, screen_size, screen_size, p_default_bg_color, false);
 
-	_fill_render_list(RENDER_LIST_SECONDARY, p_render_data, PASS_MODE_DEPTH_MATERIAL);
-	render_list[RENDER_LIST_SECONDARY].sort_by_key();
-	_fill_instance_data(RENDER_LIST_SECONDARY);
-
-	RID rp_uniform_set = _setup_render_pass_uniform_set(RENDER_LIST_SECONDARY, nullptr, false, RID(), RendererRD::MaterialStorage::get_singleton()->samplers_rd_get_default(), gbuffer_uniform_buffer_index);
+	// The render lists are filled with the Forward+ color-pass
+	// classification (PASS_MODE_COLOR on the opaque list): it is the only
+	// fill mode routing alpha and distance-faded surfaces into the alpha
+	// list (color_pass_inclusion_mask = COLOR_PASS_FLAG_TRANSPARENT), which
+	// the transparent pass draws after the shading pass. Until now the fill
+	// used the material pass mode (PASS_MODE_DEPTH_MATERIAL), whose upstream
+	// branch also includes FLAG_PASS_ALPHA surfaces: transparent materials
+	// leaked opaque garbage into the G-buffer. The geometry pass itself
+	// keeps drawing material-mode (PASS_MODE_DEPTH_MATERIAL) pipelines for
+	// its G-buffer outputs: only the list membership changed.
+	_fill_render_list(RENDER_LIST_OPAQUE, p_render_data, PASS_MODE_COLOR);
 
 	{
-		RenderListParameters render_list_params(render_list[RENDER_LIST_SECONDARY].elements.ptr(), render_list[RENDER_LIST_SECONDARY].element_info.ptr(), render_list[RENDER_LIST_SECONDARY].elements.size(), true, PASS_MODE_DEPTH_MATERIAL, 0, true, false, rp_uniform_set);
+		// The G-buffer pass must draw exactly what a color pass with no
+		// color_pass_flags would, the transparent pass owns the rest:
+		// - Depth-writing transparent surfaces (depth_draw_always materials)
+		//   land in both the opaque and the alpha lists, like in Forward+;
+		//   its opaque color pass excludes them from the draw through the
+		//   color_pass_inclusion_mask. The material-mode draw has no such
+		//   check, so mirror it here.
+		// - Texel-discard materials (alpha scissor / alpha hash:
+		//   uses_alpha_clip, opaque-class, Forward+ draws them through its
+		//   opaque color pass whose color pipelines discard the failing
+		//   texels while writing depth). The material-mode pipelines
+		//   upstream deliberately binarize the alpha instead of discarding
+		//   (MODE_RENDER_MATERIAL), so drawing them here would paint their
+		//   full quads into the G-buffer and the base depth (a lit dark
+		//   halo where the mask is transparent). They are re-routed to the
+		//   transparent pass instead: its color pipelines apply the exact
+		//   same scissor/hash discard, and the surviving texels have alpha
+		//   exactly 1 (the color pass forces it), so the blend composes the
+		//   same value as the Forward+ opaque pass pixel by pixel. Known
+		//   divergence, documented in the README: they no longer write the
+		//   base depth (the transparent pipelines disable depth writes for
+		//   them, like for any Forward+ transparent).
+		RenderList &opaque_list = render_list[RENDER_LIST_OPAQUE];
+		RenderList &alpha_list = render_list[RENDER_LIST_ALPHA];
+		uint32_t opaque_list_size = opaque_list.elements.size();
+		uint32_t kept_elements = 0;
+		for (uint32_t i = 0; i < opaque_list_size; i++) {
+			GeometryInstanceSurfaceDataCache *surf = opaque_list.elements[i];
+			if (surf->color_pass_inclusion_mask != 0) {
+				continue;
+			}
+			if ((surf->flags & GeometryInstanceSurfaceDataCache::FLAG_PASS_OPAQUE) &&
+					surf->shader->uses_alpha_clip && !surf->shader->uses_alpha_antialiasing) {
+				alpha_list.add_element(surf);
+				continue;
+			}
+			opaque_list.elements[kept_elements++] = surf;
+		}
+		opaque_list.elements.resize(kept_elements);
+	}
+
+	render_list[RENDER_LIST_OPAQUE].sort_by_key();
+	// Back-to-front by priority then depth, like the Forward+ alpha list
+	// (consumed by the transparent pass below).
+	render_list[RENDER_LIST_ALPHA].sort_by_reverse_depth_and_priority();
+
+	int *render_info = p_render_data->render_info ? p_render_data->render_info->info[RSE::VIEWPORT_RENDER_INFO_TYPE_VISIBLE] : (int *)nullptr;
+	_fill_instance_data(RENDER_LIST_OPAQUE, render_info);
+	_fill_instance_data(RENDER_LIST_ALPHA, render_info);
+
+	// Flush the geometry pipeline compilation requests (the upstream call
+	// site: after the fill, before the draws).
+	_update_dirty_geometry_pipelines();
+
+	RID rp_uniform_set = _setup_render_pass_uniform_set(RENDER_LIST_OPAQUE, nullptr, false, RID(), RendererRD::MaterialStorage::get_singleton()->samplers_rd_get_default(), gbuffer_uniform_buffer_index);
+
+	{
+		RenderListParameters render_list_params(render_list[RENDER_LIST_OPAQUE].elements.ptr(), render_list[RENDER_LIST_OPAQUE].element_info.ptr(), render_list[RENDER_LIST_OPAQUE].elements.size(), true, PASS_MODE_DEPTH_MATERIAL, 0, true, false, rp_uniform_set);
 		Vector<Color> clear = {
 			Color(0.0, 0.0, 0.0, 0), // Albedo.
 			Color(0.0, 0.0, 0.0, 0), // Normal.
@@ -400,6 +463,72 @@ void RenderSHEDeferred::_render_scene(RenderDataRD *p_render_data, const Color &
 
 	RD::get_singleton()->draw_command_end_label();
 
+	// Transparent objects (step B4): the alpha render list filled by the
+	// geometry pass is drawn by the inherited Forward+ color pass
+	// (pipelines, framebuffer, uniform sets), blended over the shaded
+	// opaque result of the lighting pass (same HDR internal texture) and
+	// depth-tested against the shared base depth buffer written by the
+	// geometry pass (same texture, load not clear). This is the
+	// intentional Forward+ reuse case of the deferred renderer design
+	// (see she_deferred/README.md): a true deferred transparent pass
+	// would need a G-buffer read-light path per-pixel.
+
+	if (scene_state.used_screen_texture || global_surface_data.screen_texture_used) {
+		RENDER_TIMESTAMP("SHE-deferred Copy Screen Texture");
+
+		// Transparent materials sampling the screen texture (refraction)
+		// must see the shaded opaque scene, like the Forward+ copy that
+		// runs right before its transparent pass.
+		_render_buffers_ensure_screen_texture(p_render_data);
+
+		if (scene_state.used_screen_texture) {
+			_render_buffers_copy_screen_texture(p_render_data);
+		}
+	}
+
+	if (scene_state.used_depth_texture || global_surface_data.depth_texture_used) {
+		RENDER_TIMESTAMP("SHE-deferred Copy Depth Texture");
+
+		_render_buffers_ensure_depth_texture(p_render_data);
+
+		if (scene_state.used_depth_texture) {
+			_render_buffers_copy_depth_texture(p_render_data);
+		}
+	}
+
+	if (!render_list[RENDER_LIST_ALPHA].elements.is_empty()) {
+		RENDER_TIMESTAMP("SHE-deferred Transparent Pass");
+		RD::get_singleton()->draw_command_begin_label("SHE-deferred Transparent Pass");
+
+		// Fresh scene data UBO for the transparent pass, like the Forward+
+		// one (its color-pass uniforms: ambient, fog, exposure...).
+		uint32_t transparent_pass_uniform_buffer_index = _setup_environment(p_render_data, false, screen_size, screen_size, p_default_bg_color, false);
+
+		// Pipeline specialization like the Forward+ passes: quality
+		// settings plus depth fog and the area light count of the baked
+		// cluster.
+		SceneShaderForwardClustered::ShaderSpecialization base_specialization = scene_shader.default_specialization;
+		base_specialization.use_depth_fog = p_render_data->environment.is_valid() && environment_get_fog_mode(p_render_data->environment) == RSE::EnvironmentFogMode::ENV_FOG_MODE_DEPTH;
+		base_specialization.cluster_has_area_light = current_cluster_builder->get_cluster_count_by_type(ClusterBuilderRD::ELEMENT_TYPE_AREA_LIGHT) != 0;
+
+		bool reverse_cull = p_render_data->scene_data->cam_transform.basis.determinant() < 0.0;
+		RendererRD::MaterialStorage::Samplers samplers = rb->get_samplers();
+
+		rp_uniform_set = _setup_render_pass_uniform_set(RENDER_LIST_ALPHA, p_render_data, false, RID(), samplers, transparent_pass_uniform_buffer_index, true);
+
+		{
+			// The Forward+ transparent color pass as-is: color = the HDR
+			// internal texture the shading pass wrote, depth = the shared
+			// base depth buffer of the geometry pass (COLOR_PASS_FLAG_TRANSPARENT
+			// pipelines write depth only for depth_draw_always materials,
+			// like Forward+).
+			RID alpha_framebuffer = forward_rb_data->get_color_pass_fb(COLOR_PASS_FLAG_TRANSPARENT);
+			RenderListParameters render_list_params(render_list[RENDER_LIST_ALPHA].elements.ptr(), render_list[RENDER_LIST_ALPHA].element_info.ptr(), render_list[RENDER_LIST_ALPHA].elements.size(), reverse_cull, PASS_MODE_COLOR, COLOR_PASS_FLAG_TRANSPARENT, false, p_render_data->directional_light_soft_shadows, rp_uniform_set, get_debug_draw_mode() == RSE::VIEWPORT_DEBUG_DRAW_WIREFRAME, Vector2(), p_render_data->scene_data->lod_distance_multiplier, p_render_data->scene_data->screen_mesh_lod_threshold, p_render_data->scene_data->view_count, 0, base_specialization, true);
+			_render_list_with_draw_list(&render_list_params, alpha_framebuffer, RD::DRAW_DEFAULT_ALL, Vector<Color>(), 0.0f, 0u, p_render_data->render_region);
+		}
+
+		RD::get_singleton()->draw_command_end_label();
+	}
 
 	RENDER_TIMESTAMP("SHE-deferred Post-Process");
 	_render_buffers_post_process_and_tonemap(p_render_data);

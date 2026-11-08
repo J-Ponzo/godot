@@ -76,10 +76,17 @@ namespace RendererSceneRenderImplementation {
 // Forward+ comparison sampler. Shadow filter sample counts are passed
 // through the push constant, read from the shared quality getters at frame
 // time (they are only valid after RendererSceneRenderRD::init()).
+// Step B4: transparent objects through the inherited Forward+ color pass
+// (the intentional Forward+ reuse case, see she_deferred/README.md). The
+// render lists are filled with the Forward+ color-pass classification
+// (opaque list -> G-buffer geometry pass, alpha list -> transparent pass):
+// the transparent pass blends over the shaded opaque result (same HDR
+// internal texture), depth-testing against the shared base depth buffer
+// written by the geometry pass. Screen/depth backbuffer copies for materials
+// sampling them run right before it, like Forward+.
 // Unsupported cases (reflection probes, multiview) fail loudly instead of
 // silently falling back to Forward+ (see the she_deferred/README.md).
-// GI, volumetrics and transparent objects are not handled by the deferred
-// path yet.
+// GI, volumetrics are not handled by the deferred path yet.
 class RenderSHEDeferred : public RenderForwardClustered {
 private:
 	// Step B1: fullscreen deferred lighting pass.
