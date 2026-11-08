@@ -173,6 +173,7 @@ void RenderSHEDeferred::_render_scene(RenderDataRD *p_render_data, const Color &
 	// shadow matrices). Forward+ does this in _setup_environment(), which
 	// the deferred path does not run.
 	bool positional_light_soft_shadows = false;
+	bool positional_light_projectors = false;
 	{
 		RendererRD::LightStorage *light_storage = RendererRD::LightStorage::get_singleton();
 		uint32_t directional_light_count = 0;
@@ -181,20 +182,29 @@ void RenderSHEDeferred::_render_scene(RenderDataRD *p_render_data, const Color &
 		p_render_data->directional_light_count = directional_light_count;
 		p_render_data->scene_data->directional_light_count = directional_light_count;
 
-		// Forward+ decides positional soft shadows per instance from its
-		// material light lists (uses_softshadow: light has a non-zero size,
-		// or is an area light). The deferred shading pass has no per-pixel
-		// instance data, so the flag is scene-global here; the per-light
-		// size check inside the shared light processing functions keeps the
-		// result identical pixel by pixel.
+		// Forward+ decides both flags from its material light lists: soft
+		// shadows per instance (uses_softshadow: light has a non-zero size,
+		// or is an area light) and light cookies per instance (the scene
+		// cull's uses_projector pairing, light_has_projector()). The
+		// deferred shading pass has no per-pixel instance data, so both are
+		// scene-global here; the per-light size and projector_rect checks
+		// inside the shared light processing functions keep the result
+		// identical pixel by pixel. Area lights are skipped for the projector
+		// flag: the lighting pass processes omni/spot lights only.
 		for (int i = 0; i < (int)p_render_data->lights->size(); i++) {
 			RID base = light_storage->light_instance_get_base_light((*p_render_data->lights)[i]);
-			if (light_storage->light_get_type(base) == RSE::LIGHT_DIRECTIONAL) {
+			const RSE::LightType light_type = light_storage->light_get_type(base);
+			if (light_type == RSE::LIGHT_DIRECTIONAL) {
 				continue;
 			}
-			if (light_storage->light_get_type(base) == RSE::LIGHT_AREA ||
+			if (light_type == RSE::LIGHT_AREA ||
 					light_storage->light_get_param(base, RSE::LIGHT_PARAM_SIZE) > CMP_EPSILON) {
 				positional_light_soft_shadows = true;
+			}
+			if (light_type != RSE::LIGHT_AREA && light_storage->light_has_projector(base)) {
+				positional_light_projectors = true;
+			}
+			if (positional_light_soft_shadows && positional_light_projectors) {
 				break;
 			}
 		}
@@ -392,6 +402,33 @@ void RenderSHEDeferred::_render_scene(RenderDataRD *p_render_data, const Color &
 			} break;
 		}
 
+		// Light projector (cookie) sampler (step B6): same per-filter
+		// selection as the Forward+ render pass set
+		// (_setup_render_pass_uniform_set, binding 11), so the lighting pass
+		// samples the decal atlas cookies exactly like the reused Forward+
+		// transparent pass pipelines do.
+		RID projector_sampler;
+		switch (light_projectors_get_filter()) {
+			case RSE::LIGHT_PROJECTOR_FILTER_NEAREST: {
+				projector_sampler = rb->get_samplers().get_sampler(RSE::CANVAS_ITEM_TEXTURE_FILTER_NEAREST, RSE::CANVAS_ITEM_TEXTURE_REPEAT_DISABLED);
+			} break;
+			case RSE::LIGHT_PROJECTOR_FILTER_LINEAR: {
+				projector_sampler = rb->get_samplers().get_sampler(RSE::CANVAS_ITEM_TEXTURE_FILTER_LINEAR, RSE::CANVAS_ITEM_TEXTURE_REPEAT_DISABLED);
+			} break;
+			case RSE::LIGHT_PROJECTOR_FILTER_NEAREST_MIPMAPS: {
+				projector_sampler = rb->get_samplers().get_sampler(RSE::CANVAS_ITEM_TEXTURE_FILTER_NEAREST_WITH_MIPMAPS, RSE::CANVAS_ITEM_TEXTURE_REPEAT_DISABLED);
+			} break;
+			case RSE::LIGHT_PROJECTOR_FILTER_LINEAR_MIPMAPS: {
+				projector_sampler = rb->get_samplers().get_sampler(RSE::CANVAS_ITEM_TEXTURE_FILTER_LINEAR_WITH_MIPMAPS, RSE::CANVAS_ITEM_TEXTURE_REPEAT_DISABLED);
+			} break;
+			case RSE::LIGHT_PROJECTOR_FILTER_NEAREST_MIPMAPS_ANISOTROPIC: {
+				projector_sampler = rb->get_samplers().get_sampler(RSE::CANVAS_ITEM_TEXTURE_FILTER_NEAREST_WITH_MIPMAPS_ANISOTROPIC, RSE::CANVAS_ITEM_TEXTURE_REPEAT_DISABLED);
+			} break;
+			case RSE::LIGHT_PROJECTOR_FILTER_LINEAR_MIPMAPS_ANISOTROPIC: {
+				projector_sampler = rb->get_samplers().get_sampler(RSE::CANVAS_ITEM_TEXTURE_FILTER_LINEAR_WITH_MIPMAPS_ANISOTROPIC, RSE::CANVAS_ITEM_TEXTURE_REPEAT_DISABLED);
+			} break;
+		}
+
 		// Mirror the Forward+ render pass set: bind the reflection atlas
 		// texture only when it is actually valid.
 		RID ref_texture = p_render_data->reflection_atlas.is_valid() ? RendererRD::LightStorage::get_singleton()->reflection_atlas_get_texture(p_render_data->reflection_atlas) : RID();
@@ -422,7 +459,7 @@ void RenderSHEDeferred::_render_scene(RenderDataRD *p_render_data, const Color &
 				RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 8, RendererRD::LightStorage::get_singleton()->get_omni_light_buffer()),
 				RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 9, RendererRD::LightStorage::get_singleton()->get_spot_light_buffer()),
 				RD::Uniform(RD::UNIFORM_TYPE_TEXTURE, 10, RendererRD::TextureStorage::get_singleton()->decal_atlas_get_texture_srgb()),
-				RD::Uniform(RD::UNIFORM_TYPE_SAMPLER, 11, default_sampler),
+				RD::Uniform(RD::UNIFORM_TYPE_SAMPLER, 11, projector_sampler),
 				RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 12, RendererRD::LightStorage::get_singleton()->get_area_light_buffer()),
 				RD::Uniform(RD::UNIFORM_TYPE_SAMPLER, 13, default_sampler),
 				RD::Uniform(RD::UNIFORM_TYPE_SAMPLER, 14, default_sampler_mipmaps),
@@ -478,6 +515,9 @@ void RenderSHEDeferred::_render_scene(RenderDataRD *p_render_data, const Color &
 		if (positional_light_soft_shadows) {
 			push_constant.feature_flags |= 2;
 		}
+		if (positional_light_projectors) {
+			push_constant.feature_flags |= 16;
+		}
 		if (GLOBAL_GET_CACHED(bool, "rendering/lights_and_shadows/multi_bounce_occlusion/enabled")) {
 			push_constant.feature_flags |= 4;
 		}
@@ -492,6 +532,20 @@ void RenderSHEDeferred::_render_scene(RenderDataRD *p_render_data, const Color &
 			case RSE::DECAL_FILTER_NEAREST_MIPMAPS_ANISOTROPIC:
 			case RSE::DECAL_FILTER_LINEAR_MIPMAPS_ANISOTROPIC: {
 				push_constant.feature_flags |= 8;
+			} break;
+			default:
+				break;
+		}
+		/* Projector (cookie) mipmapped filtering mirrors the Forward+
+		 * specialization the same way (SceneShaderForwardClustered
+		 * projector_use_mipmaps), through the same per-filter selection as
+		 * the projector sampler bound above. */
+		switch (light_projectors_get_filter()) {
+			case RSE::LIGHT_PROJECTOR_FILTER_NEAREST_MIPMAPS:
+			case RSE::LIGHT_PROJECTOR_FILTER_LINEAR_MIPMAPS:
+			case RSE::LIGHT_PROJECTOR_FILTER_NEAREST_MIPMAPS_ANISOTROPIC:
+			case RSE::LIGHT_PROJECTOR_FILTER_LINEAR_MIPMAPS_ANISOTROPIC: {
+				push_constant.feature_flags |= 32;
 			} break;
 			default:
 				break;

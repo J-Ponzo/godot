@@ -4,8 +4,10 @@
  * Forward+ material-mode pipelines, see render_she_deferred.cpp) and applies
  * ambient, directional light and clustered positional light (omni/spot, step
  * B2) contributions, with shadow maps (directional PSSM, omni dual
- * paraboloid/cube, spot; step B3), into the HDR color buffer. GI and
- * volumetrics are not implemented yet.
+ * paraboloid/cube, spot; step B3) and light cookies (projector textures,
+ * sampled by the shared light processing functions from the decal atlas they
+ * live in), into the HDR color buffer. GI and volumetrics are not
+ * implemented yet.
  *
  * Shadow map sampling reuses the shared Forward+ light processing functions
  * (scene_forward_lights_inc.glsl) for the positional lights and the shared
@@ -50,8 +52,9 @@ void main() {
 #include "../oct_inc.glsl"
 
 /* Declarations required by the shared Forward+ light processing functions
- * (positional light buffers and decal atlas are shared storages; the
- * projector helpers are stubbed until light projectors land). */
+ * (positional light buffers, decal/area light atlases and the LTC/DFG LUTs
+ * are shared storages; the projector helpers below are push-constant flags
+ * mirroring the Forward+ pipeline specializations). */
 layout(set = 0, binding = 8, std430) restrict readonly buffer OmniLights {
 	LightData data[];
 }
@@ -124,7 +127,7 @@ layout(push_constant, std430) uniform Params {
 	uint cluster_width;
 	uint cluster_type_size;
 	uint max_cluster_element_count_div_32;
-	uint feature_flags; /* bit 0: directional light soft shadows, bit 1: positional light soft shadows, bit 2: multi-bounce ambient occlusion, bit 3: decal atlas mipmapped filtering */
+	uint feature_flags; /* bit 0: directional light soft shadows, bit 1: positional light soft shadows, bit 2: multi-bounce ambient occlusion, bit 3: decal atlas mipmapped filtering, bit 4: positional light projectors (light cookies), bit 5: projector mipmapped filtering */
 	uint soft_shadow_samples;
 	uint penumbra_shadow_samples;
 	uint directional_soft_shadow_samples;
@@ -140,12 +143,26 @@ bool sc_use_directional_soft_shadows() {
 	return (push_constant.feature_flags & 1u) != 0u;
 }
 
+/* Light cookies (projectors): the fullscreen lighting pass has no per-material
+ * light-list data to specialize on, so the cookie sampling flag is scene-global
+ * here (feature_flags bit 4, computed by the renderer from the frame's
+ * positional lights): when any omni/spot light of the frame carries a
+ * projector, the projector blocks inside light_process_omni/spot run, with the
+ * per-light projector_rect check keeping the math identical pixel by pixel.
+ * Forward+ derives the same flag per material instance from the scene cull's
+ * uses_projector pairing (pipeline specialization use_light_projector). The
+ * mipmapped-filtering bit mirrors the Forward+ specialization
+ * (projector_use_mipmaps, from the light_projectors/filter project setting)
+ * like the decal one below; when set, the projector sampling gradients are the
+ * screen-space derivatives of the depth-reconstructed view position, see
+ * vertex_ddx/vertex_ddy in main() (Forward+ derives them from the interpolated
+ * vertex, dFdx of it in the scene shader). */
 bool sc_use_light_projector() {
-	return false;
+	return (push_constant.feature_flags & 16u) != 0u;
 }
 
 bool sc_projector_use_mipmaps() {
-	return false;
+	return (push_constant.feature_flags & 32u) != 0u;
 }
 
 /* Decal atlas mipmapped filtering mirrors the Forward+ pipeline
@@ -267,9 +284,10 @@ void main() {
 
 	// Screen-space derivatives of the fragment position, like the Forward+
 	// scene pass (vertex_ddx/vertex_ddy there): the soft positional shadow
-	// penumbra shapes are built from them, and the decal block below uses
-	// them as the atlas sampling gradients when mipmapped decal filtering is
-	// enabled.
+	// penumbra shapes are built from them, the decal block below uses them
+	// as the atlas sampling gradients when mipmapped decal filtering is
+	// enabled, and the projector (cookie) gradients of the positional light
+	// processing below use them when mipmapped projector filtering is.
 	vec3 vertex_ddx = dFdx(view_position);
 	vec3 vertex_ddy = dFdy(view_position);
 

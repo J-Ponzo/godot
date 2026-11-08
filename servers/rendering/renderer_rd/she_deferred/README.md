@@ -218,7 +218,56 @@ unavoidable, and every such touch is listed below.
     deferred decal projection, covered by a user-validated cross-only,
     gpu-profile-only budget (harness config.json `decals_001`; anatomy and
     isolation experiments in harness/KNOWN_ISSUES.md).
-- **Step B6+**: sky, GI/effects, as prioritized by the harness scenes.
+- **Step B6 (done)**: light cookies (projector textures) on opaque surfaces.
+  - The shared `light_process_omni`/`light_process_spot` projector blocks
+    were always compiled in the lighting pass but dead (`sc_use_light_projector()`
+    stubbed to false since B2: the fullscreen pass has no per-material
+    light-list data Forward+ derives its per-element `use_light_projector`
+    specialization from). They now run, driven by two scene-global
+    push-constant feature bits computed by the renderer from the frame's
+    positional lights (same mechanics as the scene-global soft-shadow
+    flag of B3): bit 4 "some omni/spot light of the frame carries a
+    projector" (predicate mirrored from the scene cull's `uses_projector`
+    pairing, `light_has_projector()`), bit 5 "projector mipmapped
+    filtering" (mirrors the Forward+ `projector_use_mipmaps` pipeline
+    specialization, derived from the `light_projectors/filter` project
+    setting read at frame time, like the decal bit and the sample counts).
+  - The per-light `projector_rect` check inside the shared functions keeps
+    the result identical pixel by pixel (`LightStorage::update_light_buffers()`
+    already fills the rects from the decal atlas the cookies live in, which
+    has been bound in the lighting pass uniform set since B2; its binding 11
+    now carries the per-filter projector sampler selected like the Forward+
+    render pass set instead of the plain default sampler).
+  - Structural adaptation, same class as ever: the position feeding the
+    projector matrices is the depth-reconstructed view position like for
+    the decals, and its screen-space derivatives (`dFdx`/`dFdy`) stand in
+    for the sampling gradients when mipmapped projector filtering is
+    enabled (Forward+ computes them from the interpolated vertex; the
+    harness pins `textures/light_projectors/filter` to Linear so the
+    baseline `lights_cookies_001` scene measures the cookie math itself -
+    mipmapped cross parity would measure mip-level selection instead, its
+    own scoped scene if ever needed).
+  - Transparent surfaces: unchanged, they already got cookies through the
+    B4 reused Forward+ color pass (its per-element `uses_projector`
+    specialization), validated together by the `lights_cookies_001`
+    harness scene (spot gobo with shadowed occluder, wide-angle stretch,
+    RGBA alpha-dimmed caustics + colored RGB cookie with masked specular,
+    overlapping cookies, omni dual-paraboloid cookie, transparent pane).
+  - Cross parity measured (upstream forward_plus vs local she_deferred,
+    harness `lights_cookies_001`, 2026-11-08): rmse 0.2713 (gpu) / 0.2732
+    (llvmpipe), ssim 0.99978 both, determinism bit-perfect on both
+    profiles; the residue is the reconstructed-position ulp class at
+    full-contrast cookie cells plus the shadows_001 penumbra-boundary
+    family (the scene carries positional shadows by design), covered by a
+    user-validated cross-only population budget (harness config.json
+    `lights_cookies_001`; anatomy and the user-motivated sharp-shadow
+    control that measured worse in harness/KNOWN_ISSUES.md). The full
+    suite re-run (15 compared scenes x both methods, gpu profile) passes
+    60/60 comparisons - regression, cross and determinism - with zero
+    regression on the other scenes and every budget-scoped cross residue
+    within its validated budget (regression/determinism stay strict for
+    all of them).
+- **Step B7+**: sky, GI/effects, as prioritized by the harness scenes.
 
 ## G-buffer layout
 
@@ -295,7 +344,8 @@ Design notes for future merges:
   renames or restructures `scene_forward_lights_inc.glsl`, our include breaks
   at build time (loud, fix by updating one include). The include requires a
   set of declarations in our shader (positional light buffers, decal/area
-  light atlases, LTC and DFG LUTs, samplers, `sc_*` stubs, BRDF defines
+  light atlases, LTC and DFG LUTs, samplers, the `sc_*` flag helpers
+  driving the shared feature branches, BRDF defines
   `DIFFUSE_BURLEY`/`SPECULAR_SCHLICK_GGX`, `SHADOWS_DISABLED`); if upstream
   adds new bindings referenced by that include, the build fails and the new
   declaration + uniform binding must be added (most are shared storages
@@ -363,16 +413,16 @@ Design notes for future merges:
   particles scenes are pre-existing (not pass-related), evidence in
   harness/KNOWN_ISSUES.md.
 - Light cookies (projector textures, sampled inside the shared
-  `light_process_omni/spot`) are NOT applied to opaque surfaces: the
-  lighting pass stubs `sc_use_light_projector()` to false (pre-existing
-  since B2, the fullscreen pass has no per-material light-list data that
-  Forward+ derives the flag from). Transparent surfaces drawn by the B4
-  pass DO get cookies through the inherited per-element `uses_projector`
-  specialization, exactly like Forward+. Reactivation for opaques is a
-  candidate improvement: a scene-global "some positional light uses a
-  cookie" push-constant flag (same mechanics as the soft-shadow flags) +
-  the projector filter sampler; the decal atlas the cookies live in is
-  already bound in the lighting pass uniform set.
+  `light_process_omni/spot`) are applied through scene-global
+  push-constant flags (step B6): a scene where only *some* surfaces pair
+  with a projectored light still lights every pixel of those lights'
+  cones through the projector branch, matching Forward+'s pixels (the
+  per-light `projector_rect` check below the flags is what gates the
+  projection); the only divergence is compile-time placement (specialized
+  pipeline vs uniform branch) and the derivative source of the mipmapped
+  path (see step B6). Transparent surfaces get cookies through the
+  inherited per-element `uses_projector` specialization, exactly like
+  Forward+.
 - Decal cull masks vs visual instance layers are not applied (step B5): the
   upstream decal block masks per fragment against
   `instances.data[instance_index].layer_mask`, and the G-buffer carries no
