@@ -200,6 +200,17 @@ void RenderSHEDeferred::_render_scene(RenderDataRD *p_render_data, const Color &
 		}
 	}
 
+	// Decals (step B5): update the decal buffer at the exact Forward+
+	// _pre_opaque_render() call site (between update_light_buffers() and
+	// bake_cluster()). update_decal_buffer() stores the DecalData entries
+	// and feeds the current cluster builder through the inherited
+	// setup_added_decal() hook, so the baked cluster carries decal bitmasks
+	// for both consumers of this frame's cluster: the deferred lighting
+	// pass (decals applied to the opaque G-buffer samples) and the reused
+	// Forward+ transparent pass below (whose color pipelines run the
+	// upstream decal block over transparent fragments, like in Forward+).
+	RendererRD::TextureStorage::get_singleton()->update_decal_buffer(*p_render_data->decals, p_render_data->scene_data->cam_transform);
+
 	// Bake the cluster data now that every positional light has been added.
 	current_cluster_builder->bake_cluster();
 
@@ -354,6 +365,33 @@ void RenderSHEDeferred::_render_scene(RenderDataRD *p_render_data, const Color &
 		RID default_sampler = RendererRD::MaterialStorage::get_singleton()->sampler_rd_get_default(RSE::CANVAS_ITEM_TEXTURE_FILTER_LINEAR, RSE::CANVAS_ITEM_TEXTURE_REPEAT_DISABLED);
 		RID default_sampler_mipmaps = RendererRD::MaterialStorage::get_singleton()->sampler_rd_get_default(RSE::CANVAS_ITEM_TEXTURE_FILTER_LINEAR_WITH_MIPMAPS, RSE::CANVAS_ITEM_TEXTURE_REPEAT_DISABLED);
 
+		// Decal atlas sampler for the lighting pass decal block (step B5):
+		// same per-filter selection as the Forward+ render pass set
+		// (_setup_render_pass_uniform_set), so the lighting pass samples the
+		// decal atlas exactly like the reused Forward+ transparent pass
+		// pipelines do.
+		RID decal_sampler;
+		switch (decals_get_filter()) {
+			case RSE::DECAL_FILTER_NEAREST: {
+				decal_sampler = rb->get_samplers().get_sampler(RSE::CANVAS_ITEM_TEXTURE_FILTER_NEAREST, RSE::CANVAS_ITEM_TEXTURE_REPEAT_DISABLED);
+			} break;
+			case RSE::DECAL_FILTER_LINEAR: {
+				decal_sampler = rb->get_samplers().get_sampler(RSE::CANVAS_ITEM_TEXTURE_FILTER_LINEAR, RSE::CANVAS_ITEM_TEXTURE_REPEAT_DISABLED);
+			} break;
+			case RSE::DECAL_FILTER_NEAREST_MIPMAPS: {
+				decal_sampler = rb->get_samplers().get_sampler(RSE::CANVAS_ITEM_TEXTURE_FILTER_NEAREST_WITH_MIPMAPS, RSE::CANVAS_ITEM_TEXTURE_REPEAT_DISABLED);
+			} break;
+			case RSE::DECAL_FILTER_LINEAR_MIPMAPS: {
+				decal_sampler = rb->get_samplers().get_sampler(RSE::CANVAS_ITEM_TEXTURE_FILTER_LINEAR_WITH_MIPMAPS, RSE::CANVAS_ITEM_TEXTURE_REPEAT_DISABLED);
+			} break;
+			case RSE::DECAL_FILTER_NEAREST_MIPMAPS_ANISOTROPIC: {
+				decal_sampler = rb->get_samplers().get_sampler(RSE::CANVAS_ITEM_TEXTURE_FILTER_NEAREST_WITH_MIPMAPS_ANISOTROPIC, RSE::CANVAS_ITEM_TEXTURE_REPEAT_DISABLED);
+			} break;
+			case RSE::DECAL_FILTER_LINEAR_MIPMAPS_ANISOTROPIC: {
+				decal_sampler = rb->get_samplers().get_sampler(RSE::CANVAS_ITEM_TEXTURE_FILTER_LINEAR_WITH_MIPMAPS_ANISOTROPIC, RSE::CANVAS_ITEM_TEXTURE_REPEAT_DISABLED);
+			} break;
+		}
+
 		// Mirror the Forward+ render pass set: bind the reflection atlas
 		// texture only when it is actually valid.
 		RID ref_texture = p_render_data->reflection_atlas.is_valid() ? RendererRD::LightStorage::get_singleton()->reflection_atlas_get_texture(p_render_data->reflection_atlas) : RID();
@@ -398,7 +436,9 @@ void RenderSHEDeferred::_render_scene(RenderDataRD *p_render_data, const Color &
 				RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 22, current_cluster_builder->get_cluster_buffer()),
 				RD::Uniform(RD::UNIFORM_TYPE_TEXTURE, 23, directional_shadow_texture),
 				RD::Uniform(RD::UNIFORM_TYPE_TEXTURE, 24, shadow_atlas_texture),
-				RD::Uniform(RD::UNIFORM_TYPE_SAMPLER, 25, shadow_sampler));
+				RD::Uniform(RD::UNIFORM_TYPE_SAMPLER, 25, shadow_sampler),
+				RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 26, RendererRD::TextureStorage::get_singleton()->get_decal_buffer()),
+				RD::Uniform(RD::UNIFORM_TYPE_SAMPLER, 27, decal_sampler));
 		// Cluster iteration parameters for the shading pass, same layout math as
 		// RenderForwardClustered::_setup_environment().
 		uint32_t cluster_shift = Math::get_shift_from_power_of_2(current_cluster_builder->get_cluster_size());
@@ -440,6 +480,21 @@ void RenderSHEDeferred::_render_scene(RenderDataRD *p_render_data, const Color &
 		}
 		if (GLOBAL_GET_CACHED(bool, "rendering/lights_and_shadows/multi_bounce_occlusion/enabled")) {
 			push_constant.feature_flags |= 4;
+		}
+		/* Decal atlas mipmapped filtering mirrors the Forward+ pipeline
+		 * specialization (SceneShaderForwardClustered decal_use_mipmaps):
+		 * the filter setting is read at frame time like the sample counts
+		 * below, so a mid-session quality change does not require a
+		 * pipeline rebuild here (the lighting pass is a single pipeline). */
+		switch (decals_get_filter()) {
+			case RSE::DECAL_FILTER_NEAREST_MIPMAPS:
+			case RSE::DECAL_FILTER_LINEAR_MIPMAPS:
+			case RSE::DECAL_FILTER_NEAREST_MIPMAPS_ANISOTROPIC:
+			case RSE::DECAL_FILTER_LINEAR_MIPMAPS_ANISOTROPIC: {
+				push_constant.feature_flags |= 8;
+			} break;
+			default:
+				break;
 		}
 		/* Shadow filter sample counts, matching the Forward+ pipeline
 		 * specialization (its default_specialization is refreshed when the

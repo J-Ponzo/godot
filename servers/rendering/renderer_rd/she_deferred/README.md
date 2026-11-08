@@ -173,7 +173,52 @@ unavoidable, and every such touch is listed below.
     `particles_cpu_transparent_001` rmse 0.339 / max 5, ssim >= 0.9996,
     determinism bit-perfect on all three; strict default thresholds. The
     full B3 scope re-run passes 16/16 with unchanged metrics.
-- **Step B5+**: sky, GI/effects, as prioritized by the harness scenes.
+- **Step B5 (done)**: decals, opaque and transparent, through the inherited
+  cluster.
+  - `TextureStorage::update_decal_buffer()` is driven by `_render_scene()`
+    at the exact Forward+ `_pre_opaque_render()` call site (between
+    `update_light_buffers()` and `bake_cluster()`), which also feeds the
+    current cluster builder through the inherited `setup_added_decal()`
+    hook: the baked cluster therefore carries decal bitmasks for the frame.
+  - Opaque surfaces: the lighting pass (`she_deferred_lighting.glsl`)
+    iterates cluster slot 3 and applies the upstream decal block word for
+    word (same bounds/fade/albedo/normal/ORM/emission math as
+    `scene_forward_clustered.glsl`, same `decal_data_inc.glsl` struct and
+    atlas bindings, sampler selected per `decals/filter` and mipmapped
+    filtering mirrored from the Forward+
+    `SceneShaderForwardClustered::decal_use_mipmaps` specialization through
+    a push-constant feature bit, like the soft-shadow flags). Structural
+    adaptations, same class as the B2 light sections: the view-space
+    position feeding the decal transforms is reconstructed from the depth
+    buffer instead of interpolated (the same value on a surface, modulo fp);
+    the Forward+ subgroup optimizations compile out with the per-fragment
+    application order preserved; the decal cull mask vs instance layers is
+    not applied (no per-pixel instance data in the G-buffer, see the
+    limitations below); `normal_fade` is evaluated against the base decoded
+    G-buffer normal instead of the geometric normal (not stored in the
+    G-buffer - identical on plain materials).
+  - Transparent surfaces: nothing to add by design - the B4 reused Forward+
+    color pass runs the upstream decal block on them, reading the same
+    cluster, decal buffer and atlas as Forward+ (its per-pass sampler set
+    already selects the decal-filter sampler). The G-buffer geometry pass
+    never applies decals even though its pipelines compile the decal block:
+    its render pass uniform set is built without render data (`nullptr`),
+    so the cluster binding falls back to the zero-filled default buffer,
+    exactly like the upstream `_render_material()` helper - no double
+    application between the geometry pass and the lighting pass.
+  - Cross parity measured (upstream forward_plus vs local she_deferred,
+    harness `decals_001` with sun shadows disabled - shadow parity is the
+    `shadows_001` scene's scope, see harness/KNOWN_ISSUES.md for the
+    isolation experiments including the sharp-shadow control that made the
+    residue worse, 2026-11-08): rmse 0.241 (gpu) / 0.201 (llvmpipe), ssim
+    0.9997, determinism bit-perfect both profiles. llvmpipe passes the
+    strict default thresholds outright (max 6, no pixel above 8/255); the
+    gpu profile keeps 5 isolated bilinear sub-texel flips at full-contrast
+    checker cells (max 20), the reconstructed-position ulp class of the
+    deferred decal projection, covered by a user-validated cross-only,
+    gpu-profile-only budget (harness config.json `decals_001`; anatomy and
+    isolation experiments in harness/KNOWN_ISSUES.md).
+- **Step B6+**: sky, GI/effects, as prioritized by the harness scenes.
 
 ## G-buffer layout
 
@@ -328,17 +373,13 @@ Design notes for future merges:
   cookie" push-constant flag (same mechanics as the soft-shadow flags) +
   the projector filter sampler; the decal atlas the cookies live in is
   already bound in the lighting pass uniform set.
-- Decals are not rendered at all yet: the decal block of the scene shader
-  is compiled out of the material-mode pass (`#ifndef MODE_RENDER_DEPTH`,
-  so the G-buffer has never had decals), and the deferred path never calls
-  `TextureStorage::update_decal_buffer()` (a `_pre_opaque_render()` duty),
-  so no decal ever reaches the cluster either - the transparent pass would
-  blend them if the cluster carried any. Implementing decals means driving
-  `update_decal_buffer()` (whose `setup_added_decal()` hook feeds the
-  cluster builder) before `bake_cluster()` and reusing the upstream decal
-  block in the lighting pass over the G-buffer samples; until then a decal
-  harness scene would render without decals and must be kept ignored or
-  fail loudly, never silently degraded.
+- Decal cull masks vs visual instance layers are not applied (step B5): the
+  upstream decal block masks per fragment against
+  `instances.data[instance_index].layer_mask`, and the G-buffer carries no
+  per-pixel instance data - the same limitation class as the light cull
+  masks since B2. A decal paints every layer its projection volume touches
+  on opaque surfaces; transparent surfaces keep the full Forward+
+  behavior (the B4 pass has the instance data).
 - No GI, no volumetrics, no MSAA (warned once and ignored), no reflection
   probes / multiview (error + skip), no sky (error + clear color).
 - The directional shadow bias uses the shading normal where Forward+ uses the

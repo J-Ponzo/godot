@@ -41,6 +41,7 @@ void main() {
 
 #include "../scene_data_inc.glsl"
 #include "../light_data_inc.glsl"
+#include "../decal_data_inc.glsl"
 
 #define M_PI 3.14159265359
 #define MAX_ROUGHNESS_LOD 5 /* same value as the Forward+ scene shader */
@@ -66,6 +67,15 @@ layout(set = 0, binding = 12, std430) restrict readonly buffer AreaLights {
 }
 area_lights;
 
+/* Decal data (step B5), filled by TextureStorage::update_decal_buffer()
+ * exactly as in the Forward+ _pre_opaque_render(); the decal atlas binding
+ * below samples albedo/emission through the srgb view and normal/ORM through
+ * the linear one, like the Forward+ decal block. */
+layout(set = 0, binding = 26, std430) restrict readonly buffer Decals {
+	DecalData data[];
+}
+decals;
+
 layout(set = 0, binding = 10) uniform texture2D decal_atlas_srgb;
 layout(set = 0, binding = 11) uniform sampler light_projector_sampler;
 layout(set = 0, binding = 13) uniform sampler SAMPLER_LINEAR_CLAMP;
@@ -80,6 +90,11 @@ reflections;
 layout(set = 0, binding = 19) uniform texture2D decal_atlas;
 layout(set = 0, binding = 20) uniform sampler DEFAULT_SAMPLER_LINEAR_WITH_MIPMAPS_CLAMP;
 layout(set = 0, binding = 21) uniform texture2DArray reflection_atlas;
+
+/* Decal atlas sampler, selected per decals/filter project setting like the
+ * Forward+ render pass set (the lighting pass binds it through its own set,
+ * the Forward+ material pipelines through theirs). */
+layout(set = 0, binding = 27) uniform sampler decal_sampler;
 
 /* Cluster data for the positional lights, baked every frame by the
  * inherited Forward+ cluster builder (see render_she_deferred.cpp). */
@@ -109,7 +124,7 @@ layout(push_constant, std430) uniform Params {
 	uint cluster_width;
 	uint cluster_type_size;
 	uint max_cluster_element_count_div_32;
-	uint feature_flags; /* bit 0: directional light soft shadows, bit 1: positional light soft shadows, bit 2: multi-bounce ambient occlusion */
+	uint feature_flags; /* bit 0: directional light soft shadows, bit 1: positional light soft shadows, bit 2: multi-bounce ambient occlusion, bit 3: decal atlas mipmapped filtering */
 	uint soft_shadow_samples;
 	uint penumbra_shadow_samples;
 	uint directional_soft_shadow_samples;
@@ -131,6 +146,14 @@ bool sc_use_light_projector() {
 
 bool sc_projector_use_mipmaps() {
 	return false;
+}
+
+/* Decal atlas mipmapped filtering mirrors the Forward+ pipeline
+ * specialization (decal_use_mipmaps, see SceneShaderForwardClustered): the
+ * quality setting is read at frame time and passed through the push constant
+ * (feature_flags bit 3), like the shadow filter sample counts below. */
+bool sc_decal_use_mipmaps() {
+	return (push_constant.feature_flags & 8u) != 0u;
 }
 
 /* Shadow filter sample counts: filled from the shared quality getters at
@@ -242,6 +265,135 @@ void main() {
 	vec3 view_position = view_position_h.xyz / view_position_h.w;
 	vec3 view_dir = normalize(-view_position);
 
+	// Screen-space derivatives of the fragment position, like the Forward+
+	// scene pass (vertex_ddx/vertex_ddy there): the soft positional shadow
+	// penumbra shapes are built from them, and the decal block below uses
+	// them as the atlas sampling gradients when mipmapped decal filtering is
+	// enabled.
+	vec3 vertex_ddx = dFdx(view_position);
+	vec3 vertex_ddy = dFdy(view_position);
+
+	/* Cluster iteration state shared by the decal and light sections below:
+	 * same storage layout as the Forward+ scene shader
+	 * (scene_forward_clustered.glsl). The shading pass renders the internal
+	 * texture 1:1, so its gl_FragCoord matches the cluster grid orientation. */
+	uvec2 cluster_pos = uvec2(gl_FragCoord.xy) >> push_constant.cluster_shift;
+	uint cluster_offset = (push_constant.cluster_width * cluster_pos.y + cluster_pos.x) * (push_constant.max_cluster_element_count_div_32 + 32);
+	uint cluster_z = uint(clamp((-view_position.z / scene_data_block.data.z_far) * 32.0, 0.0, 31.0));
+
+	{
+		/* Decals (step B5): iterate the cluster baked by the inherited
+		 * Forward+ cluster builder (decals live in cluster type slot 3, the
+		 * same offset as in the Forward+ decal block), and apply them to the
+		 * G-buffer samples before any lighting math, mirroring the upstream
+		 * decal block of the opaque pass word for word. Differences are
+		 * structural, documented in the she_deferred README:
+		 * - the decal transforms act on the view-space position, which the
+		 *   Forward+ scene pass interpolates per fragment and this pass
+		 *   reconstructs from the depth buffer (mathematically the same
+		 *   value on a surface, modulo fp and the depth encode);
+		 * - decal cull masks vs visual instance layers are not applied: the
+		 *   G-buffer carries no per-pixel instance data (same limitation
+		 *   class as the light cull masks, see the README);
+		 * - normal_fade is evaluated against the base G-buffer shading
+		 *   normal where Forward+ uses the geometric normal (not stored in
+		 *   the G-buffer): identical on plain materials, the only decal-block
+		 *   caller of it;
+		 * - like the light sections below, the Forward+ subgroup
+		 *   optimizations compile out: the per-fragment decal application
+		 *   order (for i ascending, bits within i descending) is identical,
+		 *   only the execution grouping differs. */
+		uint cluster_decal_offset = cluster_offset + push_constant.cluster_type_size * 3u;
+
+		uint item_min;
+		uint item_max;
+		uint item_from;
+		uint item_to;
+
+		cluster_get_item_range(cluster_decal_offset + push_constant.max_cluster_element_count_div_32 + cluster_z, item_min, item_max, item_from, item_to);
+
+		// Forward+ evaluates normal_fade against the (constant) geometric
+		// normal; the base decoded G-buffer normal stands in for it here, so
+		// earlier decals in the loop cannot influence later normal_fades.
+		vec3 base_normal = normal;
+
+		for (uint i = item_from; i < item_to; i++) {
+			uint mask = cluster_buffer.data[cluster_decal_offset + i];
+			mask &= cluster_get_range_clip_mask(i, item_min, item_max);
+
+			while (mask != 0) {
+				uint bit = findMSB(mask);
+				mask &= ~(1u << bit);
+
+				uint decal_index = 32u * i + bit;
+
+				vec3 uv_local = (decals.data[decal_index].xform * vec4(view_position, 1.0)).xyz;
+				if (any(lessThan(uv_local, vec3(0.0, -1.0, 0.0))) || any(greaterThan(uv_local, vec3(1.0)))) {
+					continue; //out of decal
+				}
+
+				float fade = pow(1.0 - (uv_local.y > 0.0 ? uv_local.y : -uv_local.y), uv_local.y > 0.0 ? decals.data[decal_index].upper_fade : decals.data[decal_index].lower_fade);
+
+				if (decals.data[decal_index].normal_fade > 0.0) {
+					fade *= smoothstep(decals.data[decal_index].normal_fade, 1.0, dot(base_normal, decals.data[decal_index].normal) * 0.5 + 0.5);
+				}
+
+				//we need ddx/ddy for mipmaps, so simulate them
+				vec2 ddx = (decals.data[decal_index].xform * vec4(vertex_ddx, 0.0)).xz;
+				vec2 ddy = (decals.data[decal_index].xform * vec4(vertex_ddy, 0.0)).xz;
+
+				if (decals.data[decal_index].albedo_rect != vec4(0.0)) {
+					//has albedo
+					vec4 decal_albedo;
+					if (sc_decal_use_mipmaps()) {
+						decal_albedo = textureGrad(sampler2D(decal_atlas_srgb, decal_sampler), uv_local.xz * decals.data[decal_index].albedo_rect.zw + decals.data[decal_index].albedo_rect.xy, ddx * decals.data[decal_index].albedo_rect.zw, ddy * decals.data[decal_index].albedo_rect.zw);
+					} else {
+						decal_albedo = textureLod(sampler2D(decal_atlas_srgb, decal_sampler), uv_local.xz * decals.data[decal_index].albedo_rect.zw + decals.data[decal_index].albedo_rect.xy, 0.0);
+					}
+					decal_albedo *= decals.data[decal_index].modulate;
+					decal_albedo.a *= fade;
+					albedo = mix(albedo, decal_albedo.rgb, decal_albedo.a * decals.data[decal_index].albedo_mix);
+
+					if (decals.data[decal_index].normal_rect != vec4(0.0)) {
+						vec3 decal_normal;
+						if (sc_decal_use_mipmaps()) {
+							decal_normal = textureGrad(sampler2D(decal_atlas, decal_sampler), uv_local.xz * decals.data[decal_index].normal_rect.zw + decals.data[decal_index].normal_rect.xy, ddx * decals.data[decal_index].normal_rect.zw, ddy * decals.data[decal_index].normal_rect.zw).xyz;
+						} else {
+							decal_normal = textureLod(sampler2D(decal_atlas, decal_sampler), uv_local.xz * decals.data[decal_index].normal_rect.zw + decals.data[decal_index].normal_rect.xy, 0.0).xyz;
+						}
+						decal_normal.xy = decal_normal.xy * vec2(2.0, -2.0) - vec2(1.0, -1.0); //users prefer flipped y normal maps in most authoring software
+						decal_normal.z = sqrt(max(0.0, 1.0 - dot(decal_normal.xy, decal_normal.xy)));
+						//convert to view space, use xzy because y is up
+						decal_normal = (decals.data[decal_index].normal_xform * decal_normal.xzy).xyz;
+
+						normal = normalize(mix(normal, decal_normal, decal_albedo.a));
+					}
+
+					if (decals.data[decal_index].orm_rect != vec4(0.0)) {
+						vec3 decal_orm;
+						if (sc_decal_use_mipmaps()) {
+							decal_orm = textureGrad(sampler2D(decal_atlas, decal_sampler), uv_local.xz * decals.data[decal_index].orm_rect.zw + decals.data[decal_index].orm_rect.xy, ddx * decals.data[decal_index].orm_rect.zw, ddy * decals.data[decal_index].orm_rect.zw).xyz;
+						} else {
+							decal_orm = textureLod(sampler2D(decal_atlas, decal_sampler), uv_local.xz * decals.data[decal_index].orm_rect.zw + decals.data[decal_index].orm_rect.xy, 0.0).xyz;
+						}
+						ao = mix(ao, decal_orm.r, decal_albedo.a);
+						roughness = mix(roughness, decal_orm.g, decal_albedo.a);
+						metallic = mix(metallic, decal_orm.b, decal_albedo.a);
+					}
+				}
+
+				if (decals.data[decal_index].emission_rect != vec4(0.0)) {
+					//emission is additive, so its independent from albedo
+					if (sc_decal_use_mipmaps()) {
+						emission.rgb += textureGrad(sampler2D(decal_atlas_srgb, decal_sampler), uv_local.xz * decals.data[decal_index].emission_rect.zw + decals.data[decal_index].emission_rect.xy, ddx * decals.data[decal_index].emission_rect.zw, ddy * decals.data[decal_index].emission_rect.zw).xyz * decals.data[decal_index].modulate.rgb * decals.data[decal_index].emission_energy * fade;
+					} else {
+						emission.rgb += textureLod(sampler2D(decal_atlas_srgb, decal_sampler), uv_local.xz * decals.data[decal_index].emission_rect.zw + decals.data[decal_index].emission_rect.xy, 0.0).xyz * decals.data[decal_index].modulate.rgb * decals.data[decal_index].emission_energy * fade;
+					}
+				}
+			}
+		}
+	}
+
 	// Ambient contribution.
 	vec4 ambient_light = scene_data_block.data.ambient_light_color_energy;
 	vec3 ambient = ambient_light.rgb * ambient_light.a;
@@ -255,12 +407,6 @@ void main() {
 	float NdotV = clamp(dot(normal, view_dir), 0.0001, 1.0);
 	vec2 envBRDF = prefiltered_dfg(roughness, NdotV);
 	hvec3 energy_compensation = hvec3(get_energy_compensation(vec3(f0), envBRDF.y));
-
-	// Penumbra shapes of the soft positional shadows are built from the
-	// screen-space derivatives of the fragment position, like the Forward+
-	// scene pass (vertex_ddx/vertex_ddy there).
-	vec3 vertex_ddx = dFdx(view_position);
-	vec3 vertex_ddy = dFdy(view_position);
 
 	half alpha = half(1.0);
 	for (uint i = 0u; i < push_constant.directional_light_count; i++) {
@@ -296,15 +442,11 @@ void main() {
 	 * the inherited Forward+ cluster builder, same buffer layout as the
 	 * Forward+ scene shader but without the subgroup optimizations (the
 	 * shading pass is a fullscreen pass, forward divergence is negligible).
-	 * Light cull masks and lightmap baked-light culling are not applied:
-	 * the G-buffer carries no per-pixel instance data. */
+	 * The cluster iteration state (cluster_pos/cluster_offset/cluster_z)
+	 * is computed above, before the decal section. Light cull masks and
+	 * lightmap baked-light culling are not applied: the G-buffer carries no
+	 * per-pixel instance data. */
 	{
-		// The shading pass renders the internal texture 1:1, so its
-		// gl_FragCoord matches the cluster grid orientation.
-		uvec2 cluster_pos = uvec2(gl_FragCoord.xy) >> push_constant.cluster_shift;
-		uint cluster_offset = (push_constant.cluster_width * cluster_pos.y + cluster_pos.x) * (push_constant.max_cluster_element_count_div_32 + 32);
-		uint cluster_z = uint(clamp((-view_position.z / scene_data_block.data.z_far) * 32.0, 0.0, 31.0));
-
 		{ //omni lights
 			uint cluster_omni_offset = cluster_offset;
 
