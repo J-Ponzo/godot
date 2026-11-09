@@ -25,10 +25,10 @@ unavoidable, and every such touch is listed below.
   color pass over the deferred-lit HDR buffer, by design), never silently.
   The step A "magenta render target" was the extreme form of this principle.
 - Sky is still NOT supported (post-B4 scope): the harness `smoke_001` scene
-  needs a procedural sky and stays ignored in `harness/config.json` for that
+  needs a procedural sky and stays ignored in `harness/she_deferred/config.json` for that
   reason; it will come back as an intentional feature once sky lands.
 - Deferred-specific limitations are tracked by the render harness
-  (`harness/config.json` ignored scenes), never silently degraded.
+  (`harness/she_deferred/config.json` ignored scenes), never silently degraded.
 
 ## Roadmap
 
@@ -127,7 +127,7 @@ unavoidable, and every such touch is listed below.
     `texture_zoo_001` harness-ignored was the old geometry pass's
     un-flip_y-corrected projection, gone since the pass renders with the
     main camera data (cross rmse=0.1324, max_delta=5, strict defaults,
-    evidence in harness/KNOWN_ISSUES.md).
+    evidence in harness/she_deferred/KNOWN_ISSUES.md).
 - **Step B4 (done)**: transparent objects through the inherited Forward+ color
   pass (the intentional Forward+ reuse case by design).
   - The render lists are filled with the Forward+ color-pass classification
@@ -208,7 +208,7 @@ unavoidable, and every such touch is listed below.
     application between the geometry pass and the lighting pass.
   - Cross parity measured (upstream forward_plus vs local she_deferred,
     harness `decals_001` with sun shadows disabled - shadow parity is the
-    `shadows_001` scene's scope, see harness/KNOWN_ISSUES.md for the
+    `shadows_001` scene's scope, see harness/she_deferred/KNOWN_ISSUES.md for the
     isolation experiments including the sharp-shadow control that made the
     residue worse, 2026-11-08): rmse 0.241 (gpu) / 0.201 (llvmpipe), ssim
     0.9997, determinism bit-perfect both profiles. llvmpipe passes the
@@ -217,7 +217,7 @@ unavoidable, and every such touch is listed below.
     checker cells (max 20), the reconstructed-position ulp class of the
     deferred decal projection, covered by a user-validated cross-only,
     gpu-profile-only budget (harness config.json `decals_001`; anatomy and
-    isolation experiments in harness/KNOWN_ISSUES.md).
+    isolation experiments in harness/she_deferred/KNOWN_ISSUES.md).
 - **Step B6 (done)**: light cookies (projector textures) on opaque surfaces.
   - The shared `light_process_omni`/`light_process_spot` projector blocks
     were always compiled in the lighting pass but dead (`sc_use_light_projector()`
@@ -261,7 +261,7 @@ unavoidable, and every such touch is listed below.
     family (the scene carries positional shadows by design), covered by a
     user-validated cross-only population budget (harness config.json
     `lights_cookies_001`; anatomy and the user-motivated sharp-shadow
-    control that measured worse in harness/KNOWN_ISSUES.md). The full
+    control that measured worse in harness/she_deferred/KNOWN_ISSUES.md). The full
     suite re-run (15 compared scenes x both methods, gpu profile) passes
     60/60 comparisons - regression, cross and determinism - with zero
     regression on the other scenes and every budget-scoped cross residue
@@ -405,13 +405,13 @@ Design notes for future merges:
   pipelines: since the geometry pass renders with the main camera data,
   the parallax inputs match the Forward+ main pass and `texture_zoo_001`
   passes the strict cross defaults (rmse 0.1324, max_delta 5; evidence in
-  harness/KNOWN_ISSUES.md).
+  harness/she_deferred/KNOWN_ISSUES.md).
 - Transparent objects are supported through the inherited Forward+ color
   pass (step B4), blend modes and particles included; cutout/hash surfaces
   skip the G-buffer (see step B4) and, unlike in Forward+, do not write
   base depth. Isolated one-particle coverage residues on the opaque
   particles scenes are pre-existing (not pass-related), evidence in
-  harness/KNOWN_ISSUES.md.
+  harness/she_deferred/KNOWN_ISSUES.md.
 - Light cookies (projector textures, sampled inside the shared
   `light_process_omni/spot`) are applied through scene-global
   push-constant flags (step B6): a scene where only *some* surfaces pair
