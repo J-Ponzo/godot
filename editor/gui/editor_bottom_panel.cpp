@@ -312,7 +312,7 @@ EditorBottomPanel::EditorBottomPanel() :
 	progress_indicator->hide();
 	bottom_hbox->add_child(progress_indicator);
 
-	EditorVersionButton *version_btn = memnew(EditorVersionButton(EditorVersionButton::FORMAT_BASIC));
+	EditorVersionButton *version_btn = memnew(EditorVersionButton(EditorVersionButton::FORMAT_SHE_FORK));
 	// Fade out the version label to be less prominent, but still readable.
 	version_btn->set_self_modulate(Color(1, 1, 1, 0.65));
 	version_btn->set_v_size_flags(Control::SIZE_SHRINK_CENTER);

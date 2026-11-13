@@ -47,6 +47,9 @@ String _get_version_string(EditorVersionButton::VersionFormat p_format) {
 		case EditorVersionButton::FORMAT_WITH_NAME_AND_BUILD: {
 			main = GODOT_VERSION_FULL_NAME;
 		} break;
+		case EditorVersionButton::FORMAT_SHE_FORK: {
+			return GODOT_VERSION_FORK_LABEL;
+		} break;
 		default: {
 			ERR_FAIL_V_MSG(GODOT_VERSION_FULL_NAME, "Unexpected format: " + itos(p_format));
 		} break;

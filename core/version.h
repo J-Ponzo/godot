@@ -85,6 +85,11 @@ extern const char *const GODOT_VERSION_HASH;
 // Set to 0 if unknown.
 extern const unsigned long long GODOT_VERSION_TIMESTAMP;
 
+// SHE fork build provenance - "SHE fork <commit hash>" when the working tree
+// was clean at build time, "SHE fork local-copy" otherwise. Generated at build
+// time in `core/version_hash.gen.cpp`.
+extern const char *const GODOT_VERSION_FORK_LABEL;
+
 #ifndef DISABLE_DEPRECATED
 // Compatibility with pre-4.5 modules.
 #define VERSION_SHORT_NAME GODOT_VERSION_SHORT_NAME

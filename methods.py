@@ -215,9 +215,25 @@ def get_git_info():
             # `git` not found in PATH.
             pass
 
+    # SHE fork: identify the built source in the editor version label. A clean
+    # working tree resolves to its commit (first 12 hash chars, matching the
+    # harness binary registry naming); a build that cannot be attested to match
+    # a commit (dirty tree, `git` unusable, exported sources) is a "local-copy"
+    # build, mirroring the harness `local_copy` role semantics.
+    fork_build = "local-copy"
+    if git_hash:
+        try:
+            git_status = subprocess.check_output(["git", "status", "--porcelain"], encoding="utf-8")
+            if not git_status.strip():
+                fork_build = git_hash[:12]
+        except (subprocess.CalledProcessError, OSError):
+            # `git` not found in PATH.
+            pass
+
     return {
         "git_hash": git_hash,
         "git_timestamp": git_timestamp,
+        "fork_label": "SHE fork " + fork_build,
     }
 
 

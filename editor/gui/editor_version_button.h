@@ -43,6 +43,8 @@ public:
 		FORMAT_WITH_BUILD,
 		// Godot Engine v4.3.2.stable.mono.official [HASH]
 		FORMAT_WITH_NAME_AND_BUILD,
+		// SHE fork 841929e6e6e3 (or "SHE fork local-copy")
+		FORMAT_SHE_FORK,
 	};
 
 private:
