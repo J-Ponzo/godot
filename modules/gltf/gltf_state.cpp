@@ -68,6 +68,8 @@ void GLTFState::_bind_methods() {
 	ClassDB::bind_method(D_METHOD("set_materials", "materials"), &GLTFState::set_materials_bind);
 	ClassDB::bind_method(D_METHOD("get_scene_name"), &GLTFState::get_scene_name);
 	ClassDB::bind_method(D_METHOD("set_scene_name", "scene_name"), &GLTFState::set_scene_name);
+	ClassDB::bind_method(D_METHOD("get_scene_extras"), &GLTFState::get_scene_extras);
+	ClassDB::bind_method(D_METHOD("set_scene_extras", "scene_extras"), &GLTFState::set_scene_extras);
 	ClassDB::bind_method(D_METHOD("get_base_path"), &GLTFState::get_base_path);
 	ClassDB::bind_method(D_METHOD("set_base_path", "base_path"), &GLTFState::set_base_path);
 	ClassDB::bind_method(D_METHOD("get_filename"), &GLTFState::get_filename);
@@ -120,6 +122,7 @@ void GLTFState::_bind_methods() {
 	ADD_PROPERTY(PropertyInfo(Variant::ARRAY, "meshes", PROPERTY_HINT_NONE, "", PROPERTY_USAGE_STORAGE | PROPERTY_USAGE_INTERNAL | PROPERTY_USAGE_EDITOR), "set_meshes", "get_meshes"); // Vector<Ref<GLTFMesh>>
 	ADD_PROPERTY(PropertyInfo(Variant::ARRAY, "materials", PROPERTY_HINT_NONE, "", PROPERTY_USAGE_STORAGE | PROPERTY_USAGE_INTERNAL | PROPERTY_USAGE_EDITOR), "set_materials", "get_materials"); // Vector<Ref<Material>
 	ADD_PROPERTY(PropertyInfo(Variant::STRING, "scene_name"), "set_scene_name", "get_scene_name"); // String
+	ADD_PROPERTY(PropertyInfo(Variant::DICTIONARY, "scene_extras"), "set_scene_extras", "get_scene_extras"); // Dictionary
 	ADD_PROPERTY(PropertyInfo(Variant::STRING, "base_path"), "set_base_path", "get_base_path"); // String
 	ADD_PROPERTY(PropertyInfo(Variant::STRING, "filename"), "set_filename", "get_filename"); // String
 	ADD_PROPERTY(PropertyInfo(Variant::PACKED_INT32_ARRAY, "root_nodes"), "set_root_nodes", "get_root_nodes"); // Vector<int>
@@ -268,6 +271,14 @@ String GLTFState::get_scene_name() const {
 
 void GLTFState::set_scene_name(const String &p_scene_name) {
 	scene_name = p_scene_name;
+}
+
+Dictionary GLTFState::get_scene_extras() const {
+	return scene_extras;
+}
+
+void GLTFState::set_scene_extras(const Dictionary &p_scene_extras) {
+	scene_extras = p_scene_extras;
 }
 
 PackedInt32Array GLTFState::get_root_nodes() const {

@@ -93,6 +93,12 @@ protected:
 	Vector<Ref<Material>> materials;
 
 	String scene_name;
+	// Loader-side counterpart of the glTF `scenes[].extras` dictionary (the
+	// Blender exporter writes the scene's custom properties there when extras
+	// are enabled). Parsed additively in _parse_scenes; SHE SDK (batch 2A2)
+	// consumers read their own keys from it through the "gltf_scene_extras"
+	// metadata attached to the generated scene root.
+	Dictionary scene_extras;
 	Vector<int> root_nodes;
 	Vector<Ref<GLTFTexture>> textures;
 	Vector<Ref<GLTFTextureSampler>> texture_samplers;
@@ -243,6 +249,9 @@ public:
 
 	String get_scene_name() const;
 	void set_scene_name(const String &p_scene_name);
+
+	Dictionary get_scene_extras() const;
+	void set_scene_extras(const Dictionary &p_scene_extras);
 
 	String get_base_path() const;
 	void set_base_path(const String &p_base_path);

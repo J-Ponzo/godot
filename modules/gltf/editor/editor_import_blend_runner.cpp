@@ -74,6 +74,7 @@ while True:
       bpy.ops.wm.open_mainfile(filepath=opts['path'])
       if opts['unpack_all']:
         bpy.ops.file.unpack_all(method='USE_LOCAL')
+      _she_select_scene_participants()
       bpy.ops.export_scene.gltf(**opts['gltf_options'])
     except Exception as e:
       export_err = e
@@ -85,13 +86,143 @@ while True:
 static constexpr char PYTHON_SCRIPT_DIRECT[] = R"(
 import bpy, sys
 opts = %s
+%s
 if bpy.app.version < (3, 0, 0):
   print('Blender 3.0 or higher is required.', file=sys.stderr)
 bpy.ops.wm.open_mainfile(filepath=opts['path'])
 if opts['unpack_all']:
   bpy.ops.file.unpack_all(method='USE_LOCAL')
+_she_select_scene_participants()
 bpy.ops.export_scene.gltf(**opts['gltf_options'])
 )";
+
+// SHE SDK (chantier `sdk`, batch 2A2) - scene-level selection.
+// Scene participation is governed by the `she_scene` custom property of the
+// active scene (posed by the add-on): when it is absent the whole block is
+// inert and the export runs byte-identical to the vanilla pipeline.
+// When present, non-participant objects are unlinked from every collection of
+// the level so they never enter the glTF: cameras and lights participate by
+// default (opt-out via `she_noimp`), empties are skipped by default (opt-in
+// via `she_noimp` explicitly false), meshes participate when they carry a role
+// (`she_collision` / `she_occluder` / `she_navmesh`), keep their visual
+// (`she_visual=keep`) or opt in explicitly (`she_noimp` explicitly false).
+// The marker matrix below is the same fail-loudly matrix as the she_sdk
+// module's import side (see modules/she_sdk/she_import.cpp): invalid states
+// raise before any scene modification, with every faulty object listed.
+// NOTE (engine convention): the embedded Python must not contain any double
+// quote character - on Unix the blocking `execute()` goes through popen(),
+// which wraps each argument in plain double quotes (the vanilla RPC/DIRECT
+// scripts follow the same single-quote discipline). The raw string also uses
+// the `she` delimiter on purpose: the Python contains `)"` sequences that
+// would terminate a plain `R"(...)"`.
+static constexpr char PYTHON_SCRIPT_SHE_SELECT[] = R"she(
+_SHE_STR_AXES = {
+  'she_collision': ('none', 'static', 'rigid', 'area'),
+  'she_collision_shape': ('trimesh', 'convex'),
+  'she_navmesh': ('off', 'mesh+nav', 'only'),
+  'she_visual': ('keep', 'drop'),
+}
+_SHE_ROLE_KEYS = ('she_collision', 'she_collision_shape', 'she_occluder', 'she_navmesh', 'she_visual')
+
+def _she_markers(obj):
+  out = {}
+  for key in obj.keys():
+    if key.startswith('she_'):
+      out[key] = obj[key]
+  return out
+
+def _she_has_role(m):
+  if m.get('she_collision') in ('static', 'rigid', 'area'):
+    return True
+  if m.get('she_occluder') is True:
+    return True
+  if m.get('she_navmesh') in ('mesh+nav', 'only'):
+    return True
+  return False
+
+def _she_participates(obj):
+  m = _she_markers(obj)
+  if m.get('she_noimp') is True:
+    return False
+  if obj.type == 'MESH':
+    return _she_has_role(m) or (m.get('she_visual') == 'keep') or ('she_noimp' in m)
+  if obj.type in ('CAMERA', 'LIGHT'):
+    return True
+  # Empties and other helper types: skipped by default (Phase C will make
+  # she_ingredients explicitly participate), opt-in per object.
+  return ('she_noimp' in m)
+
+def _she_validate(obj, errors):
+  m = _she_markers(obj)
+  where = '%s' % obj.name
+  def err(msg):
+    errors.append('%s: %s' % (where, msg))
+  for key, vals in _SHE_STR_AXES.items():
+    if key in m and not (isinstance(m[key], str) and m[key] in vals):
+      err('marker %s has an invalid value: %r' % (key, m[key]))
+  for key in ('she_occluder', 'she_noimp'):
+    if key in m and not isinstance(m[key], bool):
+      err('marker %s must be a boolean' % key)
+  col = m.get('she_collision')
+  occ = (m.get('she_occluder') is True)
+  nav = m.get('she_navmesh')
+  vis = m.get('she_visual')
+  if (m.get('she_noimp') is True) and _she_has_role(m):
+    err('marker she_noimp cannot be combined with a role')
+  if obj.type != 'MESH':
+    for key in _SHE_ROLE_KEYS:
+      if key in m:
+        err('marker %s is mesh-only' % key)
+    return
+  if col == 'none' and ('she_collision_shape' in m):
+    err('marker she_collision_shape requires a collision role (she_collision is none)')
+  if vis == 'drop' and not _she_has_role(m):
+    err('marker she_visual=drop without a role: nothing would survive the import')
+  if vis == 'drop' and col == 'rigid':
+    err('rigid bodies keep their mesh (she_visual=keep is native)')
+  if vis == 'keep' and (col == 'area' or nav == 'only'):
+    err('area / navmesh-only natively destroy the mesh (she_visual=keep is impossible)')
+  destructive = (1 if col == 'area' else 0) + (1 if nav == 'only' else 0)
+  if destructive > 1:
+    err('at most one destructive mode per node')
+  if occ:
+    if col in ('rigid', 'area'):
+      err('marker she_occluder cannot compose with a rigid/area collision body (native settings order)')
+    if nav == 'only':
+      err('marker she_occluder cannot compose with she_navmesh=only (native settings order)')
+  if col in ('rigid', 'area') and nav == 'mesh+nav':
+    err('rigid/area collision bodies cannot compose with she_navmesh=mesh+nav (native settings order)')
+
+def _she_select_scene_participants():
+  scene = bpy.context.scene
+  if not scene.get('she_scene'):
+    # Gateway (acte 2026-11-13): no flag => pure vanilla export, and any
+    # `she_*` custom property in such a scene is a configuration error (the
+    # prefix belongs to the SDK) - fail loudly with the objects listed, the
+    # same matrix the import-side module applies.
+    offenders = []
+    for obj in list(scene.objects):
+      if _she_markers(obj):
+        offenders.append(obj.name)
+    if offenders:
+      raise RuntimeError('[SHE markers] non-SHE scene carries she_* properties: ' + '; '.join(offenders))
+    return
+  keep = set()
+  errors = []
+  for obj in list(scene.objects):
+    _she_validate(obj, errors)
+    if _she_participates(obj):
+      keep.add(obj.name)
+  if errors:
+    raise RuntimeError('[SHE markers] invalid marker state: ' + '; '.join(errors))
+  skipped = 0
+  for obj in list(scene.objects):
+    if obj.name not in keep:
+      for coll in list(obj.users_collection):
+        coll.objects.unlink(obj)
+      skipped += 1
+  print('[SHE-SELECT] scene %r: kept %d object(s), skipped %d' % (scene.name, len(keep), skipped))
+)she";
 
 String dict_to_python(const Dictionary &p_dict) {
 	String entries;
@@ -248,7 +379,9 @@ Error EditorImportBlendRunner::do_import_rpc(const Dictionary &p_options) {
 	// Start Blender if not already running.
 	if (!is_running()) {
 		// Start an XML RPC server on the given port.
-		String python = vformat(PYTHON_SCRIPT_RPC, rpc_port);
+		// The SHE selection block is appended after the RPC server loop: its
+		// definitions are late-bound, `export_gltf` resolves them at call time.
+		String python = vformat(PYTHON_SCRIPT_RPC, rpc_port) + PYTHON_SCRIPT_SHE_SELECT;
 		Error err = start_blender(python, false);
 		if (err != OK || blender_pid == 0) {
 			return FAILED;
@@ -349,8 +482,9 @@ bool EditorImportBlendRunner::_extract_error_message_xml(const Vector<uint8_t> &
 }
 
 Error EditorImportBlendRunner::do_import_direct(const Dictionary &p_options) {
-	// Export glTF directly.
-	String python = vformat(PYTHON_SCRIPT_DIRECT, dict_to_python(p_options));
+	// Export glTF directly. The SHE selection block is inlined through the
+	// second placeholder so its definitions parse before the export flow.
+	String python = vformat(PYTHON_SCRIPT_DIRECT, dict_to_python(p_options), PYTHON_SCRIPT_SHE_SELECT);
 	RETURN_IF_ERROR(start_blender(python, true));
 
 	return OK;

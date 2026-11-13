@@ -40,6 +40,10 @@
 #include "editor/editor_node.h"
 #include "editor/import/3d/scene_import_settings.h"
 #include "editor/settings/editor_settings.h"
+#include "modules/modules_enabled.gen.h" // For she_sdk (additive delegation).
+#ifdef MODULE_SHE_SDK_ENABLED
+#include "core/object/ref_counted.h"
+#endif
 #include "scene/3d/importer_mesh_instance_3d.h"
 #include "scene/3d/mesh_instance_3d.h"
 #include "scene/3d/navigation/navigation_region_3d.h"
@@ -426,6 +430,22 @@ void ResourceImporterScene::_pre_fix_global(Node *p_scene, const HashMap<StringN
 	}
 }
 
+#ifdef MODULE_SHE_SDK_ENABLED
+// SHE SDK (chantier `sdk`, batch 2A2) - the editor never links against module
+// symbols (the module archives precede the editor libraries on the link
+// line), so the marker interpretation is delegated through ClassDB dispatch -
+// the canonical Godot decoupling for anything the editor consumes from a
+// module. The she_sdk module registers the interpreter class at scene
+// initialization. A fresh instance is created per delegation point (no static
+// Ref cache: it would leak past ClassDB teardown and crash at exit).
+static Ref<RefCounted> _make_she_marker_interpreter() {
+	if (ClassDB::class_exists("SHEMarkerInterpreter")) {
+		return Ref<RefCounted>(Object::cast_to<RefCounted>(ClassDB::instantiate("SHEMarkerInterpreter")));
+	}
+	return Ref<RefCounted>();
+}
+#endif
+
 static bool _teststr(const String &p_what, const String &p_str) {
 	String what = p_what;
 
@@ -687,6 +707,31 @@ Node *ResourceImporterScene::_pre_fix_node(Node *p_node, Node *p_root, HashMap<R
 
 	bool isroot = p_node == p_root;
 
+#ifdef MODULE_SHE_SDK_ENABLED
+	// SHE SDK (chantier `sdk`, batch 2A2) - additive delegation, gated on the
+	// scene flag (gateway acté 2026-11-13): in an unflagged scene the module
+	// returns the name unchanged and this whole block is inert - the vanilla
+	// suffix chain sees its inputs exactly as upstream would. In a flagged
+	// scene, a node carrying at least one `she_*` property is excluded from
+	// the suffixed-name chain (accidental native suffixes on a marked node
+	// would silently destroy what the markers describe); the module hands
+	// back either a virtual suffix name, whose branch the vanilla chain then
+	// executes below (renames included), or an empty name no branch can
+	// match.
+	bool she_chain_skip = false;
+	{
+		Ref<RefCounted> she_interp = _make_she_marker_interpreter();
+		if (she_interp.is_valid() && (bool)she_interp->call("has_she_markers", p_node)) {
+			String she_chain_name = she_interp->call("chain_name_for", p_root, p_node, name);
+			if (she_chain_name.is_empty()) {
+				she_chain_skip = true; // Node settings and/or the module drop own this node.
+			} else {
+				name = she_chain_name; // Virtual suffix: the vanilla chain executes it.
+			}
+		}
+	}
+#endif
+
 	if (!isroot && _teststr(name, "noimp")) {
 		p_node->set_owner(nullptr);
 		memdelete(p_node);
@@ -790,6 +835,16 @@ Node *ResourceImporterScene::_pre_fix_node(Node *p_node, Node *p_root, HashMap<R
 	if (!use_node_type_suffixes) {
 		return p_node;
 	}
+
+#ifdef MODULE_SHE_SDK_ENABLED
+	if (she_chain_skip) {
+		// SHE SDK (batch 2A2): a marked node whose plan does not ride the
+		// suffix chain exits it here - the mesh-name fallback ("collision
+		// inside the mesh data") is part of the chain it is excluded from.
+		// The marker settings and/or the module-side visual drop own it.
+		return p_node;
+	}
+#endif
 
 	if (_teststr(name, "occ") || _teststr(name, "occonly")) {
 		if (isroot) {
@@ -3396,6 +3451,42 @@ Error ResourceImporterScene::import(ResourceUID::ID p_source_id, const String &p
 		mesh_data = subresources["meshes"];
 	}
 
+#ifdef MODULE_SHE_SDK_ENABLED
+	{
+		// SHE SDK (chantier `sdk`, batch 2A2) - additive delegation: validate the
+		// `she_*` marker matrix (fail-loudly, one message per faulty object) and
+		// merge the marker-driven node settings into the `_subresources` "nodes"
+		// channel, which the vanilla _post_fix_node code then executes.
+		Ref<RefCounted> she_interp = _make_she_marker_interpreter();
+		if (she_interp.is_valid()) {
+			Dictionary she_plan = she_interp->call("marker_import_plan", scene);
+			PackedStringArray she_errors = she_plan.get("errors", PackedStringArray());
+			if (!she_errors.is_empty()) {
+				for (int i = 0; i < she_errors.size(); i++) {
+					ERR_PRINT("Invalid SHE marker state - " + she_errors[i]);
+				}
+				ERR_FAIL_V_MSG(ERR_INVALID_DATA, "Scene has invalid SHE markers (see errors above).");
+			}
+			Dictionary she_settings = she_plan.get("settings", Dictionary());
+			for (const KeyValue<Variant, Variant> &kv : she_settings) {
+				Dictionary node_settings;
+				if (node_data.has(kv.key)) {
+					Variant existing = node_data[kv.key];
+					if (existing.get_type() == Variant::DICTIONARY) {
+						node_settings = (Dictionary)existing.duplicate(true);
+					}
+				}
+				Dictionary marker_settings = (Dictionary)kv.value.duplicate(true);
+				for (const KeyValue<Variant, Variant> &marker_kv : marker_settings) {
+					// Marker priority: marker-driven role keys are authoritative.
+					node_settings[marker_kv.key] = marker_kv.value;
+				}
+				node_data[kv.key] = node_settings;
+			}
+		}
+	}
+#endif
+
 	float fps = 30;
 	if (p_options.has(SNAME("animation/fps"))) {
 		fps = (float)p_options[SNAME("animation/fps")];
@@ -3403,6 +3494,19 @@ Error ResourceImporterScene::import(ResourceUID::ID p_source_id, const String &p
 	bool remove_immutable_tracks = p_options.has("animation/remove_immutable_tracks") ? (bool)p_options["animation/remove_immutable_tracks"] : true;
 	_pre_fix_animations(scene, scene, node_data, animation_data, fps);
 	_post_fix_node(scene, scene, collision_map, occluder_arrays, scanned_meshes, node_data, material_data, animation_data, fps, apply_root ? root_scale : 1.0, p_source_file, p_options);
+#ifdef MODULE_SHE_SDK_ENABLED
+	// SHE SDK (chantier `sdk`, batch 2A2) - additive delegation: the module-side
+	// visual drop, executed in last order, after the occluder arrays are baked.
+	// Validated marker states whose drop has no native single counterpart (e.g.
+	// the deterministic wall "collider + occluder + drop") delete the mesh node
+	// here and keep its derivatives (bodies, navigation regions) at its place.
+	{
+		Ref<RefCounted> she_interp = _make_she_marker_interpreter();
+		if (she_interp.is_valid()) {
+			she_interp->call("apply_visual_drops", scene);
+		}
+	}
+#endif
 	_post_fix_animations(scene, scene, node_data, animation_data, fps, remove_immutable_tracks);
 
 	String root_type = p_options["nodes/root_type"];

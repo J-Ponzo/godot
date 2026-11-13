@@ -542,6 +542,17 @@ Error GLTFDocument::_parse_scenes(Ref<GLTFState> p_state) {
 				p_state->root_nodes.push_back(node);
 			}
 		}
+		// Additive (SHE SDK batch 2A2): keep the glTF `scenes[].extras`
+		// dictionary - the Blender exporter writes the scene's custom
+		// properties there (when extras are enabled). The dictionary is
+		// attached to the generated scene root as "gltf_scene_extras"
+		// metadata in generate_scene(); no interpretation happens here.
+		if (scene_dict.has("extras")) {
+			Variant extras = scene_dict["extras"];
+			if (extras.get_type() == Variant::DICTIONARY) {
+				p_state->scene_extras = (Dictionary)extras;
+			}
+		}
 		// Determine what to use for the scene name.
 		if (scene_dict.has("name") && !String(scene_dict["name"]).is_empty() && !((String)scene_dict["name"]).begins_with("Scene")) {
 			p_state->scene_name = scene_dict["name"];
@@ -7290,6 +7301,14 @@ Node *GLTFDocument::generate_scene(Ref<GLTFState> p_state, float p_bake_fps, boo
 	if (unlikely(root_importer_mesh)) {
 		godot_root_node = GLTFDocumentExtensionConvertImporterMesh::convert_importer_mesh_instance_3d(root_importer_mesh);
 		memdelete(root_importer_mesh);
+	}
+	// Additive (SHE SDK batch 2A2): attach the glTF `scenes[].extras`
+	// dictionary (parsed in _parse_scenes) to the generated root as ordinary
+	// "gltf_scene_extras" metadata - a generic channel, no SHE knowledge in
+	// this module: consumers (the she_sdk import interpretation reads its
+	// `she_scene` flag there) pick their own keys.
+	if (!p_state->scene_extras.is_empty()) {
+		godot_root_node->set_meta("gltf_scene_extras", p_state->scene_extras);
 	}
 	for (Ref<GLTFDocumentExtension> ext : document_extensions) {
 		ERR_CONTINUE(ext.is_null());
