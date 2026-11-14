@@ -328,7 +328,17 @@ void RenderSHEDeferred::_render_scene(RenderDataRD *p_render_data, const Color &
 	ERR_FAIL_NULL(rb_data);
 
 	if (rb->get_msaa_3d() != RSE::VIEWPORT_MSAA_DISABLED) {
-		WARN_PRINT_ONCE("SHE-deferred: MSAA is not supported by the deferred path yet, rendering ignoring it.");
+		// Binary pixel semantics by design (chantier sdk, docs/sdk/design.md,
+		// the anti-aliasing convention): the deferred G-buffer carries no
+		// coverage blending and the runtime raster stays AA-less. A future
+		// sdk-driven batch may add MSAA G-buffer attachments + a resolve
+		// pass (the upstream precedent is resolve.glsl); until then this
+		// fails LOUDLY: the old WARN was a lie - with msaa_3d configured the
+		// Forward+ MSAA render-buffer layout starves the deferred geometry
+		// framebuffer (its resolved depth_texture carries no attachment
+		// usage bit), and the render silently produced an EMPTY G-buffer.
+		ERR_PRINT_ONCE("SHE-deferred: MSAA is not supported by the deferred path (binary pixels by design, see docs/sdk/design.md) - skipping render.");
+		return;
 	}
 
 	// Positional light clusters (step B2): reuse the inherited Forward+

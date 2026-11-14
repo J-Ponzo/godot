@@ -549,7 +549,13 @@ Design notes for future merges:
   masks since B2. A decal paints every layer its projection volume touches
   on opaque surfaces; transparent surfaces keep the full Forward+
   behavior (the B4 pass has the instance data).
-- No GI, no volumetrics, no MSAA (warned once and ignored), no reflection
+- No GI, no volumetrics, no MSAA (error + skip, the same fail-loudly
+  bucket as reflection probes — and NOT a "yet": the Binary pixels by
+  design posture is acté in `docs/sdk/design.md`, the anti-aliasing
+  convention; a future sdk-driven batch may add MSAA G-buffer + resolve.
+  The previous WARN was a lie measured with msaa_3d on: the Forward+
+  MSAA render-buffer layout starves the deferred geometry framebuffer
+  and the render silently outputs an EMPTY G-buffer), no reflection
   probes / multiview (error + skip), no sky (error + clear color).
 - The directional shadow bias uses the shading normal where Forward+ uses the
   geometric normal (no geometric normal in the G-buffer).
