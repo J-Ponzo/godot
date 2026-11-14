@@ -90,6 +90,14 @@ public:
 	virtual double get_total_time() const = 0;
 	virtual bool can_create_resources_async() const = 0;
 
+	// SHEngine fork addition (chantier sdk, batch 2A3): see
+	// RenderingServer::she_request_gbuffer_dump(). No-op default so the
+	// dummy compositor implementations stay unaffected. Editor builds
+	// only (TOOLS_ENABLED).
+#ifdef TOOLS_ENABLED
+	virtual void she_request_gbuffer_dump(const String &p_dump_dir) {}
+#endif // TOOLS_ENABLED
+
 	static bool is_low_end() { return low_end; }
 	virtual bool is_xr_enabled() const;
 

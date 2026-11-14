@@ -1018,6 +1018,16 @@ bool RendererSceneRenderRD::_debug_draw_can_use_effects(RSE::ViewportDebugDraw p
 		case RSE::VIEWPORT_DEBUG_DRAW_CLUSTER_DECALS:
 		case RSE::VIEWPORT_DEBUG_DRAW_CLUSTER_REFLECTION_PROBES:
 		case RSE::VIEWPORT_DEBUG_DRAW_INTERNAL_BUFFER:
+// SHEngine fork addition (chantier sdk, batch 2A3): the SHE G-buffer
+// attachment views replace the whole output, like the internal buffer
+// view. Editor builds only (TOOLS_ENABLED).
+#ifdef TOOLS_ENABLED
+		case RSE::VIEWPORT_DEBUG_DRAW_SHE_GB_ALBEDO:
+		case RSE::VIEWPORT_DEBUG_DRAW_SHE_GB_NORMAL:
+		case RSE::VIEWPORT_DEBUG_DRAW_SHE_GB_ORM:
+		case RSE::VIEWPORT_DEBUG_DRAW_SHE_GB_EMISSION:
+		case RSE::VIEWPORT_DEBUG_DRAW_SHE_GB_DEPTH:
+#endif // TOOLS_ENABLED
 			can_use_effects = false;
 			break;
 		// Modes that draws information over part of the viewport needs camera effects because we see partially the normal draw mode.
@@ -1402,6 +1412,12 @@ void RendererSceneRenderRD::render_scene(const Ref<RenderSceneBuffers> &p_render
 
 		scene_data.z_near = p_camera_data->main_projection.get_z_near();
 		scene_data.z_far = p_camera_data->main_projection.get_z_far();
+
+		// SHEngine fork addition (chantier sdk, batch 2A3).
+		scene_data.she_dg_depth = p_camera_data->she_dg_depth;
+		scene_data.she_dg_albedo = p_camera_data->she_dg_albedo;
+		scene_data.she_dg_normal = p_camera_data->she_dg_normal;
+		scene_data.she_dg_orm = p_camera_data->she_dg_orm;
 
 		// this should be the same for all cameras..
 		const float lod_distance_multiplier = p_camera_data->main_projection.get_lod_multiplier();

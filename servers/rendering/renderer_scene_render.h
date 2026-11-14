@@ -318,6 +318,14 @@ public:
 		Vector2 taa_jitter;
 		float taa_frame_count = 0.0f;
 
+		// SHEngine fork addition (chantier sdk, batch 2A3): the DG-buffer
+		// map texture RIDs bound to the camera (empty = none). Filled by the
+		// cull at the main viewport draw, consumed by the RD scene data.
+		RID she_dg_depth;
+		RID she_dg_albedo;
+		RID she_dg_normal;
+		RID she_dg_orm;
+
 		void set_camera(const Transform3D p_transform, const Projection p_projection, bool p_is_orthogonal, bool p_vaspect, const Vector2 &p_taa_jitter = Vector2(), float p_taa_frame_count = 0.0f, uint32_t p_visible_layers = 0xFFFFFFFF);
 		void set_multiview_camera(const Transform3D &p_transform, const LocalVector<Transform3D> &p_offsets, const LocalVector<Projection> &p_projection, bool p_is_orthogonal, bool p_vaspect, uint32_t p_visible_layers = 0xFFFFFFFF);
 	};

@@ -77,7 +77,16 @@ public:
 	}
 
 	static uint32_t get_gbuffer_usage_bits(bool p_msaa, bool p_storage) {
-		return RenderSceneBuffersRD::get_color_usage_bits(false, p_msaa, p_storage);
+		uint32_t usage_bits = RenderSceneBuffersRD::get_color_usage_bits(false, p_msaa, p_storage);
+#ifdef TOOLS_ENABLED
+		// SHEngine fork addition (chantier sdk, batch 2A3): the gbuffer
+		// dump (RenderingServer::she_request_gbuffer_dump()) reads the
+		// attachments back to the CPU; non-MSAA color textures do not
+		// carry CAN_COPY_FROM by default. Editor instrumentation: the
+		// bit is absent from packaged game templates (no readback path).
+		usage_bits |= RD::TEXTURE_USAGE_CAN_COPY_FROM_BIT;
+#endif // TOOLS_ENABLED
+		return usage_bits;
 	}
 
 	void ensure_gbuffer();

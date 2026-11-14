@@ -33,6 +33,7 @@
 #include "core/templates/vector.h"
 #include "core/variant/dictionary.h"
 
+#include "she_dg.h"
 #include "she_import.h"
 
 bool SHEMarkerInterpreter::scene_is_she(Node *p_scene_root) const {
@@ -71,10 +72,15 @@ void SHEMarkerInterpreter::apply_visual_drops(Node *p_scene_root) const {
 	she_sdk::apply_visual_drops(p_scene_root);
 }
 
+void SHEMarkerInterpreter::apply_dg_buffers(Node *p_scene_root, const String &p_source_file) const {
+	she_sdk::apply_dg_post_import(p_scene_root, p_source_file);
+}
+
 void SHEMarkerInterpreter::_bind_methods() {
 	ClassDB::bind_method(D_METHOD("scene_is_she", "scene_root"), &SHEMarkerInterpreter::scene_is_she);
 	ClassDB::bind_method(D_METHOD("has_she_markers", "node"), &SHEMarkerInterpreter::has_she_markers);
 	ClassDB::bind_method(D_METHOD("chain_name_for", "scene_root", "node", "name"), &SHEMarkerInterpreter::chain_name_for);
 	ClassDB::bind_method(D_METHOD("marker_import_plan", "scene_root"), &SHEMarkerInterpreter::marker_import_plan);
 	ClassDB::bind_method(D_METHOD("apply_visual_drops", "scene_root"), &SHEMarkerInterpreter::apply_visual_drops);
+	ClassDB::bind_method(D_METHOD("apply_dg_buffers", "scene_root", "source_file"), &SHEMarkerInterpreter::apply_dg_buffers);
 }

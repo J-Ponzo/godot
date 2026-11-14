@@ -66,6 +66,17 @@ public:
 	float z_near = 0.0;
 	float z_far = 0.0;
 
+	// SHEngine fork addition (chantier sdk, batch 2A3): the DG-buffer map
+	// texture RIDs bound to the active camera (copied from the cull camera
+	// through CameraData at the main viewport draw; probe/shadow renders
+	// never carry them). Consumed by the SHE-deferred renderer to
+	// initialize the G-buffer before its geometry pass; empty RIDs = no
+	// DG-buffer (plain path, bit-identical to no DG-buffer support).
+	RID she_dg_depth;
+	RID she_dg_albedo;
+	RID she_dg_normal;
+	RID she_dg_orm;
+
 	float lod_distance_multiplier = 0.0;
 	float screen_mesh_lod_threshold = 0.0;
 

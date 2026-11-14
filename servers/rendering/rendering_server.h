@@ -546,6 +546,17 @@ public:
 	virtual void camera_set_compositor(RID p_camera, RID p_compositor) = 0;
 	virtual void camera_set_use_vertical_aspect(RID p_camera, bool p_enable) = 0;
 
+	// SHEngine fork addition (chantier sdk, batch 2A3): bind the
+	// baked deterministic-layer G-buffer maps to a camera. The textures are
+	// the per-camera EXR maps of the DG-buffer (depth: clamp-shell-remapped
+	// bake.json clip shell; albedo, normal, orm - see docs/sdk/design.md).
+	// The SHE-deferred renderer consumes them to initialize the G-buffer
+	// before its geometry pass, so the baked background occludes the
+	// interactive world through the base depth buffer at no raster cost.
+	// Consumed by the she_deferred rendering method only; the RIDs are
+	// inert under the other methods. An all-empty set unbinds.
+	virtual void camera_set_she_dgbuffer(RID p_camera, RID p_depth_texture, RID p_albedo_texture, RID p_normal_texture, RID p_orm_texture) = 0;
+
 	/* VIEWPORT API */
 
 	virtual RID viewport_create() = 0;
@@ -1059,6 +1070,21 @@ public:
 
 	String get_current_rendering_driver_name() const;
 	String get_current_rendering_method() const;
+
+#ifdef TOOLS_ENABLED
+	// SHEngine fork addition (chantier sdk, batch 2A3): request the
+	// SHE-deferred renderer to dump the G-buffer attachments of the next
+	// rendered 3D frame (plus its linear HDR color buffer) as RGB
+	// full-float EXR files into the given directory (albedo.exr,
+	// normal.exr, orm.exr, emission.exr, depth.exr, hdr_frame.exr).
+	// The request is one-shot: the next frame rendered by the she_deferred
+	// method consumes it; under any other rendering method it stays inert
+	// and the dump never happens (callers validate the expected output
+	// files). The base of the SDK harness's per-map G-buffer oracle.
+	// Editor builds only (TOOLS_ENABLED): dump instrumentation never
+	// ships in packaged game templates.
+	virtual void she_request_gbuffer_dump(const String &p_dump_dir) = 0;
+#endif // TOOLS_ENABLED
 
 #ifdef TOOLS_ENABLED
 	virtual void get_argument_options(const StringName &p_function, int p_idx, List<String> *r_options) const override;

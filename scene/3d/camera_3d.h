@@ -85,6 +85,13 @@ private:
 	Ref<Environment> environment;
 	Ref<CameraAttributes> attributes;
 	Ref<Compositor> compositor;
+	// SHEngine fork addition (chantier sdk, batch 2A3): the DGBuffer
+	// resource bound to this camera (a Resource because the DGBuffer class
+	// is owned by the she_sdk module; the engine core resolves it by
+	// property name and never links against module symbols - the 2A2
+	// ClassDB discipline). The resource contract carries Texture2D-valued
+	// properties named depth/albedo/normal/orm.
+	Ref<Resource> she_dg_buffer;
 	void _attributes_changed();
 
 	// void _camera_make_current(Node *p_camera);
@@ -192,6 +199,11 @@ public:
 
 	void set_compositor(const Ref<Compositor> &p_compositor);
 	Ref<Compositor> get_compositor() const;
+
+	// SHEngine fork addition (chantier sdk, batch 2A3): see she_dg_buffer.
+	void set_dg_buffer(const Ref<Resource> &p_dg_buffer);
+	Ref<Resource> get_dg_buffer() const;
+	void _she_push_dg_buffer();
 
 	void set_keep_aspect_mode(KeepAspect p_aspect);
 	KeepAspect get_keep_aspect_mode() const;

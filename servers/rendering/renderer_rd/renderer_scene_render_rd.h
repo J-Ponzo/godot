@@ -75,6 +75,22 @@ protected:
 	double time = 0.0;
 	double time_step = 0.0;
 
+	/* SHEngine fork addition (chantier sdk, batch 2A3): one-shot G-buffer
+	 * dump request (RenderingServer::she_request_gbuffer_dump()). Set
+	 * through the public setter by the compositor, consumed and cleared
+	 * by the SHE-deferred renderer at the next frame it renders; inert for
+	 * the other scene renderers. Editor builds only (TOOLS_ENABLED):
+	 * dump instrumentation never ships in packaged game templates. */
+#ifdef TOOLS_ENABLED
+	String _she_gbuffer_dump_request;
+
+	_FORCE_INLINE_ String take_she_gbuffer_dump_request() {
+		String request = _she_gbuffer_dump_request;
+		_she_gbuffer_dump_request = String();
+		return request;
+	}
+#endif // TOOLS_ENABLED
+
 	/* ENVIRONMENT */
 
 	bool glow_bicubic_upscale = false;
@@ -173,6 +189,12 @@ private:
 
 public:
 	static RendererSceneRenderRD *get_singleton() { return singleton; }
+
+	/* SHE fork additions (chantier sdk, batch 2A3) */
+
+#ifdef TOOLS_ENABLED
+	_FORCE_INLINE_ void set_she_gbuffer_dump_request(const String &p_dump_dir) { _she_gbuffer_dump_request = p_dump_dir; }
+#endif // TOOLS_ENABLED
 
 	/* LIGHTING */
 

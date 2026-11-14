@@ -30,20 +30,24 @@
 
 #include "register_types.h"
 
+#include "she_dg_buffer.h"
 #include "she_import_interpreter.h"
 
 #include "core/object/class_db.h"
 
-// The SHE SDK module (chantier `sdk`, batch 2A2). The marker interpretation
+// The SHE SDK module (chantier `sdk`, batch 2A2: marker interpretation; batch
+// 2A3: DGBuffer generation at scene import). The marker and DG interpretation
 // lives here and is consumed by the editor scene importer through ClassDB
 // dispatch (ResourceImporterScene instantiates SHEMarkerInterpreter and
 // delegates at its additive interpretation points), so the editor never
-// links against module symbols. EditorPlugin registrations will arrive with
-// the UI batches.
+// links against module symbols. The DGBuffer resource is the camera-side
+// property-name contract resolved by Camera3D (which stays module-agnostic).
+// EditorPlugin registrations will arrive with the UI batches.
 
 void initialize_she_sdk_module(ModuleInitializationLevel p_level) {
 	if (p_level == MODULE_INITIALIZATION_LEVEL_SCENE) {
 		GDREGISTER_CLASS(SHEMarkerInterpreter);
+		GDREGISTER_CLASS(DGBuffer);
 	}
 }
 

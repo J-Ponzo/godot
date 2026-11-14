@@ -267,6 +267,101 @@ unavoidable, and every such touch is listed below.
     regression on the other scenes and every budget-scoped cross residue
     within its validated budget (regression/determinism stay strict for
     all of them).
+- **SDK batch 2A3, milestone J1 (chantier `sdk`, see `docs/sdk/roadmap.md`)**:
+  gbuffer debug views + headless dump, the instrumentation the sdk harness's
+  per-map G-buffer oracle is built on (all of it additive):
+  - Five additive `ViewportDebugDraw` values
+    (`VIEWPORT_DEBUG_DRAW_SHE_GB_ALBEDO/NORMAL/ORM/EMISSION/DEPTH`) display
+    one G-buffer attachment as the visible frame through the inherited
+    post-process chain (fullscreen passthrough blit,
+    `shaders/she_deferred/she_debug_view.glsl`). Consumed by the SHE-deferred
+    renderer only - they are no-ops under the other methods, and they disable
+    camera effects like the internal buffer view (added to the shared
+    `_debug_draw_can_use_effects()` full-override bucket). They are NOT in
+    the 3D editor's debug draw menu (the upstream editor file is left
+    untouched): they are script/inspector territory.
+  - `RenderingServer::she_request_gbuffer_dump(dir)`: a one-shot request
+    that dumps the final G-buffer attachments of the next rendered frame
+    (plus its linear HDR color buffer, before the inherited post-process)
+    into `dir` as RGB full-float EXR files:
+    `albedo/normal/orm/emission/depth/hdr_frame.exr`. The single-channel
+    depth attachment replicates across RGB and alpha is dropped, matching
+    the RGB shape of the Blender-baked maps; the dumped values are exactly
+    what the attachments store (packing included) - the oracle compares
+    dumps to dumps, never a dumped buffer against a differently-encoded
+    one. Dispatch is additive end to end: RenderingServer ->
+    RenderingServerDefault (COMPOSITOR section) ->
+    `RendererCompositorRD::she_request_gbuffer_dump()` -> the request
+    member of `RendererSceneRenderRD` (public setter, protected one-shot
+    consumption by `RenderSHEDeferred` only). Under any other rendering
+    method the request stays inert and the dump never happens - callers
+    validate the expected files. The linear HDR color buffer cannot be read
+    back directly (base color textures carry no CAN_COPY_FROM), so a
+    lazily created `hdr_dump_frame` copy texture in the SHE scope bridges
+    it; the G-buffer textures gained CAN_COPY_FROM for the readback. The
+    CPU readback stalls the draw inside the frame: a debug/dump path, not a
+    release rendering path. The `[SHE-DUMP]` stdout lines (one per file
+    plus a completion line) are the harness validation markers.
+  - **Strip**: all of J1 is editor instrumentation, compiled only when
+    `TOOLS_ENABLED` is defined (editor builds - the only binaries the
+    harness builds): the five debug draw values + mirrors, the dump
+    request chain end to end, the debug-view shader (GLSL source not even
+    registered - `she_debug_view.glsl.gen.h` is not included), the
+    `hdr_dump_frame` texture, the G-buffer's `CAN_COPY_FROM` usage bit,
+    and the dump-only `DirAccess` include. Packaged game templates carry
+    none of it. J2's camera DG chain and
+    init pass (below) are production code: never stripped.
+- **SDK batch 2A3, milestone J2 (chantier `sdk`, see `docs/sdk/roadmap.md`)**:
+  the camera-side DG chain and the G-buffer init pass (all additive):
+  - `Camera3D.dg_buffer` is a `Resource` property resolved **by property
+    names** (`depth`, `albedo`, `normal`, `orm` - `Texture2D` each, through
+    `Object::get()`): zero link from the engine core to the sdk module (the
+    2A2 ClassDB discipline) - the module's `DGBuffer` class (J3) is merely
+    one resource exposing them; the binding is pushed through
+    `RenderingServer::camera_set_she_dgbuffer(camera, depth, albedo, normal,
+    orm)` whenever the property is set (the RS camera RID exists from
+    construction). The RIDs ride the existing camera data path:
+    `RendererSceneCull` camera members -> `CameraData` -> `RenderSceneDataRD`,
+    copied once at scene-data setup.
+  - `_she_init_gbuffer_from_dg()`
+    (`shaders/she_deferred/she_dg_init.glsl`): a fullscreen pass run before
+    the geometry pass when a complete binding is present; partial or
+    invalid bindings fail loudly (`ERR_PRINT_ONCE`) and fall back to the
+    plain path - a wrong init is worse than no init. **Depth first**: the DG
+    depth map (the clip-shell remap, acté 2A1) is decoded through the
+    scene-data UBO's `z_near`/`z_far` into a view-space distance and written
+    through `gl_FragDepth` with the UBO's projection matrix - the exact
+    device depth a surface at that distance would rasterize (same UBO as
+    the material pass, consistent by construction) - so interactive
+    geometry depth-tests against the baked room for free. Albedo passes
+    through (linear, alpha 1 like the opaque binarize); the normal is
+    Blender WORLD-space in the bake (the sdk harness's dg oracle proved
+    it - floor (0,0,1), left wall (1,0,0) in the map) and goes
+    `(x, z, -y)` to Godot world space, then through the UBO's view
+    rotation (`read_view_matrix`, reconstructed verbatim from the
+    upstream pattern - the attachment stores view space like the
+    material pipelines' own normals) before the same Crytek `encode24`
+    + best-fit LUT (LUT regenerated deferred-side, the Forward+ member
+    is private); degenerate baked normals match the clear instead of
+    NaN-ing the byte storage. The view rotation was a J4-oracle
+    discovery: every camera involved from the POC to J3 was
+    identity-rotated (view == world), which hid the missing rotation
+    from the POC convention - the first pitched-camera twin deviated
+    by 17 degrees median, and went byte-exact (94.6% against the
+    raster) once fixed; ORM passes rgb through with `sss` = 0 (the R
+    channel is the Cycles-combined AO, the oracle's convention
+    exclusion). After an
+    init the geometry pass clears emission only (`DRAW_CLEAR_COLOR_3`)
+    instead of the whole G-buffer (`DRAW_CLEAR_ALL`); no DG map feeds
+    emission in this batch.
+  - Validated on the cam_001 twin (J1 dump oracle, maps from the 2A1
+    re-bake): over baked pixels the dumped DG init equals the maps
+    bit-exactly in albedo (max abs diff 0) and within 1.5e-6 m in
+    view-space depth (the shell01 round-trip); the interactive near box
+    rasterizes over the init at its exact face distance (0.75 m), and the
+    interactive far box sitting behind the baked wall is rejected by the
+    depth test - present in the plain dump at 3.15 m, absent from the DG
+    dump which keeps the baked wall (2.37-2.48 m).
 - **Step B7+**: sky, GI/effects, as prioritized by the harness scenes.
 
 ## G-buffer layout
@@ -331,6 +426,21 @@ merge, re-check each entry still applies and still compiles:
 | `editor/project_manager/project_dialog.cpp`, `editor/editor_node.cpp`, `editor/settings/editor_settings.cpp`, `core/config/project_settings.cpp` | `she_deferred` entries | project manager / settings / supported features / default-renderer fallback |
 | `methods.py`, `core/core_builders.py`, `core/version.h` | new build-time constant `GODOT_VERSION_FORK_LABEL`, generated into `version_hash.gen.cpp` by `get_git_info()` + `version_hash_builder()` from a `git status --porcelain` clean-tree check (non-rendering fork addition) | identifies the built source where the binaries are actually run: "SHE fork `<commit>`" for a clean tree (12-char hash, same convention as the harness binary registry names) or "SHE fork local-copy" when the tree cannot be attested to match a commit (dirty tree, `git` unusable, exported sources) |
 | `editor/gui/editor_version_button.h/.cpp`, `editor/gui/editor_bottom_panel.cpp` | new `FORMAT_SHE_FORK` version format, used by the bottom-panel footer | replaces the upstream version string in the editor status bar with the fork provenance label; About dialog and project manager keep their upstream formats |
+| `rendering_server_enums.h` (SDK 2A3 J1) | +5 `VIEWPORT_DEBUG_DRAW_SHE_GB_*` values at the enum end (kept contiguous) | SHE G-buffer attachment debug views |
+| `rendering_server.h`, `rendering_server.cpp` (SDK 2A3 J1) | `she_request_gbuffer_dump()` public API + ClassDB bind | gbuffer dump request (the per-map G-buffer oracle of the sdk harness) |
+| `rendering_server_default.h` (SDK 2A3 J1) | `FUNC1(she_request_gbuffer_dump, ...)` dispatch in the COMPOSITOR section | gbuffer dump request |
+| `renderer_compositor.h` (SDK 2A3 J1) | `she_request_gbuffer_dump()` virtual, default no-op | gbuffer dump request (the dummy compositor impls stay unaffected) |
+| `renderer_rd/renderer_compositor_rd.h`, `renderer_compositor_rd.cpp` (SDK 2A3 J1) | override forwarding the dump request to `RendererSceneRenderRD` | gbuffer dump request |
+| `renderer_rd/renderer_scene_render_rd.h` (SDK 2A3 J1) | request member + public setter + protected take-once consumption | gbuffer dump request (consumed by `RenderSHEDeferred` only) |
+| `renderer_rd/renderer_scene_render_rd.cpp` (SDK 2A3 J1) | the 5 enum values added to the `_debug_draw_can_use_effects()` full-override bucket | debug view semantics (no camera effects on the attachment views) |
+| `scene/main/viewport.h` (SDK 2A3 J1) | +5 `DEBUG_DRAW_SHE_GB_*` mirror values | GD/inspector exposure of the debug views |
+| `scene/3d/camera_3d.h`, `scene/3d/camera_3d.cpp` (SDK 2A3 J2) | `dg_buffer` `Ref<Resource>` property (property-name contract through `Object::get()`), `_she_push_dg_buffer()` push, binds | the deterministic-layer camera input; core stays module-agnostic (2A2 ClassDB discipline) |
+| `servers/rendering/rendering_server.h`, `rendering_server.cpp` (SDK 2A3 J2) | `camera_set_she_dgbuffer()` public API + ClassDB bind | DG binding push, camera-scoped |
+| `servers/rendering/rendering_server_default.h` (SDK 2A3 J2) | `FUNC5(camera_set_she_dgbuffer, ...)` in the CAMERA section | DG binding push dispatch |
+| `servers/rendering/rendering_method.h` (SDK 2A3 J2) | `camera_set_she_dgbuffer()` virtual, default no-op | DG binding push dispatch (other renderers stay inert) |
+| `servers/rendering/renderer_scene_cull.h`, `renderer_scene_cull.cpp` (SDK 2A3 J2) | `camera_set_she_dgbuffer()` override + `she_dg_*` Camera members, copied into `CameraData` at `render_scene` | DG binding reaches the render data |
+| `servers/rendering/renderer_scene_render.h` (SDK 2A3 J2) | 4 `she_dg_*` RIDs in `CameraData` | DG binding in the render data struct |
+| `servers/rendering/renderer_rd/storage_rd/render_scene_data_rd.h`, `renderer_scene_render_rd.cpp` (SDK 2A3 J2) | 4 `she_dg_*` members + getters, filled at scene-data setup from `CameraData` | DG handoff to `RenderSHEDeferred` |
 
 Design notes for future merges:
 

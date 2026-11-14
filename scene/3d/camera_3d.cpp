@@ -36,6 +36,7 @@
 #include "core/object/callable_mp.h"
 #include "core/object/class_db.h"
 #include "scene/main/viewport.h"
+#include "scene/resources/texture.h"
 #include "servers/rendering/rendering_server.h"
 
 #ifndef PHYSICS_3D_DISABLED
@@ -655,6 +656,48 @@ Ref<Compositor> Camera3D::get_compositor() const {
 	return compositor;
 }
 
+// SHEngine fork addition (chantier sdk, batch 2A3): resolve one DG-buffer
+// map to its texture RID through the resource contract (a Texture2D-valued
+// property of the given name). Name-based through Object::get() so the
+// engine core never links against the she_sdk module symbols (the 2A2
+// ClassDB discipline); a missing or invalid property resolves to an empty
+// RID, which the loud paths catch at bind time.
+static RID _she_dg_texture_rid(const Ref<Resource> &p_dg_buffer, const StringName &p_property) {
+	if (p_dg_buffer.is_null()) {
+		return RID();
+	}
+	bool valid = false;
+	Variant value = p_dg_buffer->get(p_property, &valid);
+	if (!valid || value.get_type() != Variant::OBJECT) {
+		return RID();
+	}
+	Ref<Texture2D> texture = value;
+	if (texture.is_null()) {
+		return RID();
+	}
+	return texture->get_rid();
+}
+
+void Camera3D::_she_push_dg_buffer() {
+	if (!camera.is_valid()) {
+		return;
+	}
+	RenderingServer::get_singleton()->camera_set_she_dgbuffer(camera,
+			_she_dg_texture_rid(she_dg_buffer, SNAME("depth")),
+			_she_dg_texture_rid(she_dg_buffer, SNAME("albedo")),
+			_she_dg_texture_rid(she_dg_buffer, SNAME("normal")),
+			_she_dg_texture_rid(she_dg_buffer, SNAME("orm")));
+}
+
+void Camera3D::set_dg_buffer(const Ref<Resource> &p_dg_buffer) {
+	she_dg_buffer = p_dg_buffer;
+	_she_push_dg_buffer();
+}
+
+Ref<Resource> Camera3D::get_dg_buffer() const {
+	return she_dg_buffer;
+}
+
 void Camera3D::set_keep_aspect_mode(KeepAspect p_aspect) {
 	keep_aspect = p_aspect;
 	RenderingServer::get_singleton()->camera_set_use_vertical_aspect(camera, p_aspect == KEEP_WIDTH);
@@ -725,6 +768,9 @@ void Camera3D::_bind_methods() {
 	ClassDB::bind_method(D_METHOD("get_attributes"), &Camera3D::get_attributes);
 	ClassDB::bind_method(D_METHOD("set_compositor", "compositor"), &Camera3D::set_compositor);
 	ClassDB::bind_method(D_METHOD("get_compositor"), &Camera3D::get_compositor);
+	// SHEngine fork addition (chantier sdk, batch 2A3).
+	ClassDB::bind_method(D_METHOD("set_dg_buffer", "dg_buffer"), &Camera3D::set_dg_buffer);
+	ClassDB::bind_method(D_METHOD("get_dg_buffer"), &Camera3D::get_dg_buffer);
 	ClassDB::bind_method(D_METHOD("set_keep_aspect_mode", "mode"), &Camera3D::set_keep_aspect_mode);
 	ClassDB::bind_method(D_METHOD("get_keep_aspect_mode"), &Camera3D::get_keep_aspect_mode);
 	ClassDB::bind_method(D_METHOD("set_doppler_tracking", "mode"), &Camera3D::set_doppler_tracking);
@@ -746,6 +792,10 @@ void Camera3D::_bind_methods() {
 	ADD_PROPERTY(PropertyInfo(Variant::OBJECT, "environment", PROPERTY_HINT_RESOURCE_TYPE, Environment::get_class_static()), "set_environment", "get_environment");
 	ADD_PROPERTY(PropertyInfo(Variant::OBJECT, "attributes", PROPERTY_HINT_RESOURCE_TYPE, "CameraAttributesPractical,CameraAttributesPhysical"), "set_attributes", "get_attributes");
 	ADD_PROPERTY(PropertyInfo(Variant::OBJECT, "compositor", PROPERTY_HINT_RESOURCE_TYPE, Compositor::get_class_static()), "set_compositor", "get_compositor");
+	// SHEngine fork addition (chantier sdk, batch 2A3): the DGBuffer class
+	// is owned by the she_sdk module (resolved by name; without the module
+	// the property stays empty and inert).
+	ADD_PROPERTY(PropertyInfo(Variant::OBJECT, "dg_buffer", PROPERTY_HINT_RESOURCE_TYPE, "DGBuffer"), "set_dg_buffer", "get_dg_buffer");
 	ADD_PROPERTY(PropertyInfo(Variant::FLOAT, "h_offset", PROPERTY_HINT_NONE, "suffix:m"), "set_h_offset", "get_h_offset");
 	ADD_PROPERTY(PropertyInfo(Variant::FLOAT, "v_offset", PROPERTY_HINT_NONE, "suffix:m"), "set_v_offset", "get_v_offset");
 	ADD_PROPERTY(PropertyInfo(Variant::INT, "doppler_tracking", PROPERTY_HINT_ENUM, "Disabled,Idle,Physics"), "set_doppler_tracking", "get_doppler_tracking");

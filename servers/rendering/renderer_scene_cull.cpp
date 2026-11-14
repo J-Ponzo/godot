@@ -147,6 +147,17 @@ void RendererSceneCull::camera_set_transform(RID p_camera, const Transform3D &p_
 	camera->transform = p_transform.orthonormalized();
 }
 
+// SHEngine fork addition (chantier sdk, batch 2A3).
+void RendererSceneCull::camera_set_she_dgbuffer(RID p_camera, RID p_depth_texture, RID p_albedo_texture, RID p_normal_texture, RID p_orm_texture) {
+	Camera *camera = camera_owner.get_or_null(p_camera);
+	ERR_FAIL_NULL(camera);
+
+	camera->she_dg_depth = p_depth_texture;
+	camera->she_dg_albedo = p_albedo_texture;
+	camera->she_dg_normal = p_normal_texture;
+	camera->she_dg_orm = p_orm_texture;
+}
+
 void RendererSceneCull::camera_set_cull_mask(RID p_camera, uint32_t p_layers) {
 	Camera *camera = camera_owner.get_or_null(p_camera);
 	ERR_FAIL_NULL(camera);
@@ -2798,6 +2809,15 @@ void RendererSceneCull::render_camera(const Ref<RenderSceneBuffers> &p_render_bu
 	} else {
 		ERR_FAIL_MSG("Unsupported camera setup.");
 	}
+
+	// SHEngine fork addition (chantier sdk, batch 2A3): carry the camera's
+	// DG-buffer map texture RIDs into the scene data of this main viewport
+	// draw (the reflection probe renders below never carry them - they
+	// render their own camera).
+	camera_data.she_dg_depth = camera->she_dg_depth;
+	camera_data.she_dg_albedo = camera->she_dg_albedo;
+	camera_data.she_dg_normal = camera->she_dg_normal;
+	camera_data.she_dg_orm = camera->she_dg_orm;
 
 	RID environment = _render_get_environment(p_camera, p_scenario);
 	RID compositor = _render_get_compositor(p_camera, p_scenario);

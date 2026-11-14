@@ -729,6 +729,8 @@ public:
 	FUNC2(camera_set_camera_attributes, RID, RID)
 	FUNC2(camera_set_compositor, RID, RID)
 	FUNC2(camera_set_use_vertical_aspect, RID, bool)
+	// SHEngine fork addition (chantier sdk, batch 2A3).
+	FUNC5(camera_set_she_dgbuffer, RID, RID, RID, RID, RID)
 
 	/* OCCLUDER */
 	FUNCRIDSPLIT(occluder)
@@ -1164,6 +1166,14 @@ public:
 #define server_name RSG::rasterizer
 
 	FUNC4S(set_boot_image_with_stretch, const Ref<Image> &, const Color &, RSE::SplashStretchMode, bool)
+
+	// SHEngine fork addition (chantier sdk, batch 2A3): one-shot
+	// gbuffer dump request, dispatched to
+	// RendererCompositor::she_request_gbuffer_dump(). Editor builds
+	// only (TOOLS_ENABLED).
+#ifdef TOOLS_ENABLED
+	FUNC1(she_request_gbuffer_dump, const String &)
+#endif // TOOLS_ENABLED
 
 	/* STATUS INFORMATION */
 

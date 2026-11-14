@@ -604,6 +604,20 @@ enum ViewportDebugDraw {
 	VIEWPORT_DEBUG_DRAW_INTERNAL_BUFFER,
 	VIEWPORT_DEBUG_DRAW_CLUSTER_AREA_LIGHTS,
 	VIEWPORT_DEBUG_DRAW_AREA_LIGHT_ATLAS,
+	/* SHEngine fork addition (chantier sdk, batch 2A3): SHE-deferred
+	 * G-buffer attachment views. Consumed by the she_deferred renderer
+	 * only; other rendering methods ignore them (the deferred G-buffer
+	 * does not exist there). Kept contiguous at the end of the enum for
+	 * range checks. Editor builds only (TOOLS_ENABLED): the harness
+	 * instrumentation is editor-driven and never ships in packaged game
+	 * templates. */
+#ifdef TOOLS_ENABLED
+	VIEWPORT_DEBUG_DRAW_SHE_GB_ALBEDO,
+	VIEWPORT_DEBUG_DRAW_SHE_GB_NORMAL,
+	VIEWPORT_DEBUG_DRAW_SHE_GB_ORM,
+	VIEWPORT_DEBUG_DRAW_SHE_GB_EMISSION,
+	VIEWPORT_DEBUG_DRAW_SHE_GB_DEPTH,
+#endif // TOOLS_ENABLED
 };
 
 enum ViewportVRSMode {

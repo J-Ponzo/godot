@@ -3495,15 +3495,22 @@ Error ResourceImporterScene::import(ResourceUID::ID p_source_id, const String &p
 	_pre_fix_animations(scene, scene, node_data, animation_data, fps);
 	_post_fix_node(scene, scene, collision_map, occluder_arrays, scanned_meshes, node_data, material_data, animation_data, fps, apply_root ? root_scale : 1.0, p_source_file, p_options);
 #ifdef MODULE_SHE_SDK_ENABLED
-	// SHE SDK (chantier `sdk`, batch 2A2) - additive delegation: the module-side
-	// visual drop, executed in last order, after the occluder arrays are baked.
-	// Validated marker states whose drop has no native single counterpart (e.g.
-	// the deterministic wall "collider + occluder + drop") delete the mesh node
-	// here and keep its derivatives (bodies, navigation regions) at its place.
+	// SHE SDK (chantier `sdk`) - additive delegation, one interpreter
+	// instance for every module-side interpretation on the built scene:
+	// batch 2A2's visual drop (after the occluder arrays are baked;
+	// validated marker states whose drop has no native single counterpart
+	// delete the mesh node here and keep its derivatives at its place),
+	// then batch 2A3's DG post-import (DGBuffer generation from the bake
+	// descriptor, .import options pinning, camera binding by name, clip
+	// coherence validation - the camera property persists through the
+	// standard scene save). Both no-op without the scene she_scene flag;
+	// the DG post-import additionally without a dg/bake.json next to the
+	// source.
 	{
 		Ref<RefCounted> she_interp = _make_she_marker_interpreter();
 		if (she_interp.is_valid()) {
 			she_interp->call("apply_visual_drops", scene);
+			she_interp->call("apply_dg_buffers", scene, p_source_file);
 		}
 	}
 #endif

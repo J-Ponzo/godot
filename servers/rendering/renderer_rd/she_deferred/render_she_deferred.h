@@ -33,7 +33,13 @@
 #include "servers/rendering/renderer_rd/forward_clustered/render_forward_clustered.h"
 #include "servers/rendering/renderer_rd/pipeline_cache_rd.h"
 #include "servers/rendering/storage/ltc_lut.gen.h"
+#include "servers/rendering/renderer_rd/shaders/forward_clustered/best_fit_normal.glsl.gen.h"
 #include "servers/rendering/renderer_rd/shaders/she_deferred/she_deferred_lighting.glsl.gen.h"
+#ifdef TOOLS_ENABLED
+#include "servers/rendering/renderer_rd/shaders/she_deferred/she_debug_view.glsl.gen.h"
+#endif // TOOLS_ENABLED
+#include "servers/rendering/renderer_rd/shaders/she_deferred/she_dg_init.glsl.gen.h"
+#include "servers/rendering/renderer_rd/she_deferred/render_buffer_data_she_deferred.h"
 
 #define RB_SCOPE_SHE_DEFERRED SNAME("she_deferred")
 
@@ -42,6 +48,14 @@
 #define RB_TEX_GB_ORM SNAME("gbuffer_orm")
 #define RB_TEX_GB_EMISSION SNAME("gbuffer_emission")
 #define RB_TEX_GB_DEPTH SNAME("gbuffer_depth")
+// SHEngine fork addition (chantier sdk, batch 2A3): copy of the linear HDR
+// color buffer owned by the gbuffer dump (the internal color texture cannot
+// be read back directly), created lazily on the first dump. Editor builds
+// only (TOOLS_ENABLED): dump instrumentation never ships in packaged game
+// templates.
+#ifdef TOOLS_ENABLED
+#define RB_TEX_HDR_DUMP SNAME("hdr_dump_frame")
+#endif // TOOLS_ENABLED
 
 namespace RendererSceneRenderImplementation {
 
@@ -105,7 +119,39 @@ private:
 	RID ltc_lut1_texture = RID();
 	RID ltc_lut2_texture = RID();
 
+	// Chantier sdk, batch 2A3: fullscreen passthrough blit (debug draw
+	// attachment views + the HDR copy of the gbuffer dump) and the dump
+	// itself (RenderingServer::she_request_gbuffer_dump()). Editor builds
+	// only (TOOLS_ENABLED): this instrumentation never ships in packaged
+	// game templates (the GLSL source is not even registered).
+#ifdef TOOLS_ENABLED
+	SheDebugViewShaderRD debug_view_shader;
+	RID debug_view_shader_version;
+	PipelineCacheRD debug_view_pipeline;
+
+	void _render_she_debug_view(const RID &p_source_rd_texture, const RID &p_dest_fb);
+	void _she_dump_gbuffer(RenderDataRD *p_render_data, const Ref<RenderBufferDataSHEDeferred> &p_rb_data, const String &p_dump_dir);
+#endif // TOOLS_ENABLED
+
 	void ensure_lighting_luts();
+
+	// Chantier sdk, batch 2A3: the DG-buffer G-buffer init pass (fullscreen
+	// quad writing albedo/normal/ORM, the view-space depth attachment and
+	// the base depth buffer from the camera's baked DG maps, before the
+	// geometry pass - see shaders/she_deferred/she_dg_init.glsl). Returns
+	// whether the G-buffer was initialized (the geometry pass then clears
+	// only the emission attachment and loads everything else).
+	SheDgInitShaderRD dg_init_shader;
+	RID dg_init_shader_version;
+	PipelineCacheRD dg_init_pipeline;
+	RID dg_init_scene_data_ubo = RID();
+	// Best-fit-normal LUT for the init's normal encoder, generated at
+	// construction like the forward shader's (the forward member is
+	// private to SceneShaderForwardClustered, same regeneration pattern as
+	// the DFG LUT).
+	RID best_fit_normal_texture = RID();
+
+	bool _she_init_gbuffer_from_dg(RenderDataRD *p_render_data, const Ref<RenderBufferDataSHEDeferred> &p_rb_data, const Color &p_default_bg_color);
 
 public:
 	void setup_render_buffer_data(Ref<RenderSceneBuffersRD> p_render_buffers) override;

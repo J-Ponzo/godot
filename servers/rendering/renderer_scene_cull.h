@@ -89,6 +89,14 @@ public:
 		RID attributes;
 		RID compositor;
 
+		// SHEngine fork addition (chantier sdk, batch 2A3): the DG-buffer
+		// map texture RIDs bound through camera_set_she_dgbuffer(). Empty
+		// RIDs = no DG-buffer (plain rasterization path, unchanged).
+		RID she_dg_depth;
+		RID she_dg_albedo;
+		RID she_dg_normal;
+		RID she_dg_orm;
+
 		Transform3D transform; // Our main camera transform
 		LocalVector<Transform3D> offsets; // camera offsets for each view
 		LocalVector<Projection> projections; // projection matrix for each view
@@ -120,6 +128,10 @@ public:
 	virtual void camera_set_camera_attributes(RID p_camera, RID p_attributes);
 	virtual void camera_set_compositor(RID p_camera, RID p_compositor);
 	virtual void camera_set_use_vertical_aspect(RID p_camera, bool p_enable);
+	// SHEngine fork addition (chantier sdk, batch 2A3): stores the
+	// DG-buffer map texture RIDs on the camera, carried into the scene
+	// data at the main viewport draw (render_scene).
+	virtual void camera_set_she_dgbuffer(RID p_camera, RID p_depth_texture, RID p_albedo_texture, RID p_normal_texture, RID p_orm_texture) override;
 	virtual bool is_camera(RID p_camera) const;
 #ifndef XR_DISABLED
 	virtual bool is_xr_camera(RID p_camera) const;

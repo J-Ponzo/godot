@@ -134,6 +134,13 @@ public:
 
 	virtual void set_boot_image_with_stretch(const Ref<Image> &p_image, const Color &p_color, RSE::SplashStretchMode p_stretch_mode, bool p_use_filter) override;
 
+	// SHEngine fork addition (chantier sdk, batch 2A3): forwards the
+	// RenderingServer G-buffer dump request to the scene renderer that
+	// owns the deferred G-buffer. Editor builds only (TOOLS_ENABLED).
+#ifdef TOOLS_ENABLED
+	virtual void she_request_gbuffer_dump(const String &p_dump_dir) override;
+#endif // TOOLS_ENABLED
+
 	virtual void initialize() override;
 	virtual void begin_frame(double frame_step) override;
 	virtual void blit_render_targets_to_screen(DisplayServerEnums::WindowID p_screen, const RenderingServerTypes::BlitToScreen *p_render_targets, int p_amount) override;

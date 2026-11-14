@@ -2859,6 +2859,8 @@ void RenderingServer::_bind_methods() {
 	ClassDB::bind_method(D_METHOD("camera_set_camera_attributes", "camera", "effects"), &RenderingServer::camera_set_camera_attributes);
 	ClassDB::bind_method(D_METHOD("camera_set_compositor", "camera", "compositor"), &RenderingServer::camera_set_compositor);
 	ClassDB::bind_method(D_METHOD("camera_set_use_vertical_aspect", "camera", "enable"), &RenderingServer::camera_set_use_vertical_aspect);
+	// SHEngine fork addition (chantier sdk, batch 2A3).
+	ClassDB::bind_method(D_METHOD("camera_set_she_dgbuffer", "camera", "depth_texture", "albedo_texture", "normal_texture", "orm_texture"), &RenderingServer::camera_set_she_dgbuffer);
 
 	/* VIEWPORT */
 
@@ -3540,6 +3542,10 @@ void RenderingServer::_bind_methods() {
 	ClassDB::bind_method(D_METHOD("get_white_texture"), &RenderingServer::get_white_texture);
 
 	ClassDB::bind_method(D_METHOD("set_boot_image_with_stretch", "image", "color", "stretch_mode", "use_filter"), &RenderingServer::set_boot_image_with_stretch, DEFVAL(true));
+#ifdef TOOLS_ENABLED
+	// SHEngine fork addition (chantier sdk, batch 2A3).
+	ClassDB::bind_method(D_METHOD("she_request_gbuffer_dump", "dir"), &RenderingServer::she_request_gbuffer_dump);
+#endif
 #ifndef DISABLE_DEPRECATED
 	ClassDB::bind_method(D_METHOD("set_boot_image", "image", "color", "scale", "use_filter"), &RenderingServer::set_boot_image, DEFVAL(true));
 #endif

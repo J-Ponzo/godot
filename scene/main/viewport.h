@@ -189,6 +189,20 @@ public:
 		DEBUG_DRAW_INTERNAL_BUFFER,
 		DEBUG_DRAW_CLUSTER_AREA_LIGHTS,
 		DEBUG_DRAW_AREA_LIGHT_ATLAS,
+		/* SHEngine fork addition (chantier sdk, batch 2A3): SHE-deferred
+		 * G-buffer attachment views, consumed by the she_deferred
+		 * rendering method only (kept contiguous at the end, mirroring
+		 * RSE::ViewportDebugDraw). Not in the 3D editor's debug draw menu
+		 * (upstream file left untouched); settable from script and from
+		 * the inspector. Editor builds only (TOOLS_ENABLED), like the
+		 * mirrored RSE enum. */
+#ifdef TOOLS_ENABLED
+		DEBUG_DRAW_SHE_GB_ALBEDO,
+		DEBUG_DRAW_SHE_GB_NORMAL,
+		DEBUG_DRAW_SHE_GB_ORM,
+		DEBUG_DRAW_SHE_GB_EMISSION,
+		DEBUG_DRAW_SHE_GB_DEPTH,
+#endif // TOOLS_ENABLED
 	};
 
 	enum DefaultCanvasItemTextureFilter {

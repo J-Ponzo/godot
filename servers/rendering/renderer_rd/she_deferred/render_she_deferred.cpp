@@ -31,6 +31,12 @@
 #include "render_she_deferred.h"
 
 #include "core/config/project_settings.h"
+#ifdef TOOLS_ENABLED
+// Chantier sdk, batch 2A3: director access only serves the gbuffer dump
+// (_she_dump_gbuffer): editor instrumentation, stripped from game templates
+// with its consumers.
+#include "core/io/dir_access.h"
+#endif // TOOLS_ENABLED
 #include "core/io/image.h"
 #include "servers/rendering/rendering_server.h"
 #include "servers/rendering/rendering_device.h"
@@ -90,6 +96,207 @@ void RenderSHEDeferred::ensure_lighting_luts() {
 	lut2_image = Image::create_from_data(dimensions, dimensions, false, Image::FORMAT_RGBAF, lut2_data);
 
 	ltc_lut2_texture = RS::get_singleton()->texture_2d_create(lut2_image);
+}
+
+// Chantier sdk, batch 2A3: fullscreen passthrough blit (the debug draw
+// attachment views in _render_scene(), and the HDR copy of the gbuffer
+// dump below). Samples exactly what the source holds: no decode, no
+// rescale. The three helpers of this section (debug-view blit, EXR
+// readback, gbuffer dump) are editor instrumentation: editor builds
+// only (TOOLS_ENABLED), never shipped in packaged game templates.
+#ifdef TOOLS_ENABLED
+void RenderSHEDeferred::_render_she_debug_view(const RID &p_source_rd_texture, const RID &p_dest_fb) {
+	RID shader_rid = debug_view_shader.version_get_shader(debug_view_shader_version, 0);
+	ERR_FAIL_COND(shader_rid.is_null());
+
+	RID sampler = RendererRD::MaterialStorage::get_singleton()->sampler_rd_get_default(RSE::CANVAS_ITEM_TEXTURE_FILTER_LINEAR, RSE::CANVAS_ITEM_TEXTURE_REPEAT_DISABLED);
+	RID uniform_set = UniformSetCacheRD::get_singleton()->get_cache(shader_rid, 0,
+			RD::Uniform(RD::UNIFORM_TYPE_SAMPLER_WITH_TEXTURE, 0, Vector<RID>({ sampler, p_source_rd_texture })));
+
+	RD::DrawListID draw_list = RD::get_singleton()->draw_list_begin(p_dest_fb, RD::DRAW_DEFAULT_ALL);
+	RD::get_singleton()->draw_list_bind_render_pipeline(draw_list, debug_view_pipeline.get_render_pipeline(RD::INVALID_ID, RD::get_singleton()->framebuffer_get_format(p_dest_fb)));
+	RD::get_singleton()->draw_list_bind_uniform_set(draw_list, uniform_set, 0);
+	RD::get_singleton()->draw_list_bind_index_array(draw_list, RendererRD::MaterialStorage::get_singleton()->get_quad_index_array());
+	RD::get_singleton()->draw_list_draw(draw_list, true);
+	RD::get_singleton()->draw_list_end();
+}
+
+// Chantier sdk, batch 2A3: reads one attachment back and saves it as a
+// 3-channel full-float EXR - the G-buffer oracle convention of the sdk
+// harness (Blender bakes RGB EXR maps, so single-channel maps replicate
+// across RGB and alpha is dropped; the baked values are exactly what the
+// attachment stores, packing included).
+static void she_dump_rd_texture_to_exr(RID p_rd_texture, const Size2i &p_size, RD::DataFormat p_format, const String &p_path) {
+	Vector<uint8_t> data = RD::get_singleton()->texture_get_data(p_rd_texture, 0);
+	ERR_FAIL_COND_MSG(data.is_empty(), "SHE-deferred: empty readback for the gbuffer dump of " + p_path);
+
+	Image::Format image_format = Image::FORMAT_MAX;
+	int channel_count = 0;
+	switch (p_format) {
+		case RD::DATA_FORMAT_R16G16B16A16_SFLOAT: {
+			image_format = Image::FORMAT_RGBAH;
+			channel_count = 4;
+		} break;
+		case RD::DATA_FORMAT_R8G8B8A8_UNORM: {
+			image_format = Image::FORMAT_RGBA8;
+			channel_count = 4;
+		} break;
+		case RD::DATA_FORMAT_R32_SFLOAT: {
+			image_format = Image::FORMAT_RF;
+			channel_count = 1;
+		} break;
+		default: {
+			ERR_FAIL_MSG("SHE-deferred: unsupported attachment format for the gbuffer dump.");
+		} break;
+	}
+
+	Ref<Image> image = Image::create_from_data(p_size.width, p_size.height, false, image_format, data);
+	if (channel_count == 4) {
+		image->convert(Image::FORMAT_RGBF);
+	} else {
+		// Replicate the single depth channel across RGB, matching the RGB
+		// shape of the baked maps.
+		int pixel_count = p_size.width * p_size.height;
+		Vector<uint8_t> rgb_data;
+		rgb_data.resize(pixel_count * 3 * 4);
+		const float *src = (const float *)data.ptr();
+		float *dst = (float *)rgb_data.ptrw();
+		for (int i = 0; i < pixel_count; i++) {
+			dst[i * 3 + 0] = src[i];
+			dst[i * 3 + 1] = src[i];
+			dst[i * 3 + 2] = src[i];
+		}
+		image = Image::create_from_data(p_size.width, p_size.height, false, Image::FORMAT_RGBF, rgb_data);
+	}
+
+	ERR_FAIL_COND_MSG(image->save_exr(p_path) != OK, "SHE-deferred: failed to write the gbuffer dump " + p_path);
+	print_line("[SHE-DUMP] " + p_path + " " + itos(p_size.width) + "x" + itos(p_size.height));
+}
+
+// Chantier sdk, batch 2A3: dumps the final G-buffer attachments of the
+// frame plus its linear HDR color buffer into the requested directory, as
+// the fixed file set albedo/normal/orm/emission/depth/hdr_frame.exr (the
+// per-map G-buffer oracle consumed by the sdk harness). Stalls the draw
+// (CPU readback): a debug/dump path, not a release rendering path.
+void RenderSHEDeferred::_she_dump_gbuffer(RenderDataRD *p_render_data, const Ref<RenderBufferDataSHEDeferred> &p_rb_data, const String &p_dump_dir) {
+	Ref<RenderSceneBuffersRD> rb = p_render_data->render_buffers;
+	ERR_FAIL_COND(rb.is_null());
+	ERR_FAIL_COND(p_rb_data.is_null());
+	ERR_FAIL_COND(!p_rb_data->has_gbuffer());
+
+	Size2i size = rb->get_internal_size();
+
+	/* The linear HDR color buffer cannot be read back directly (the base
+	 * color usage bits carry no CAN_COPY_FROM), so the dump goes through a
+	 * lazily created copy frame owned by the SHE scope of the render
+	 * buffers. */
+	if (!rb->has_texture(RB_SCOPE_SHE_DEFERRED, RB_TEX_HDR_DUMP)) {
+		uint32_t usage_bits = RenderSceneBuffersRD::get_color_usage_bits(false, false, false) | RD::TEXTURE_USAGE_CAN_COPY_FROM_BIT;
+		rb->create_texture(RB_SCOPE_SHE_DEFERRED, RB_TEX_HDR_DUMP, rb->get_base_data_format(), usage_bits);
+	}
+	RID dump_frame = rb->get_texture(RB_SCOPE_SHE_DEFERRED, RB_TEX_HDR_DUMP);
+	_render_she_debug_view(rb->get_internal_texture(), FramebufferCacheRD::get_singleton()->get_cache(dump_frame));
+
+	Error dir_error = DirAccess::make_dir_recursive_absolute(p_dump_dir);
+	ERR_FAIL_COND_MSG(dir_error != OK && dir_error != ERR_ALREADY_EXISTS, "SHE-deferred: cannot create the gbuffer dump directory " + p_dump_dir);
+
+	struct DumpAttachment {
+		const char *name;
+		RID texture;
+		RD::DataFormat format;
+	};
+	const DumpAttachment dumps[] = {
+		{ "albedo", p_rb_data->get_albedo(), RenderBufferDataSHEDeferred::get_gbuffer_albedo_format() },
+		{ "normal", p_rb_data->get_normal(), RenderBufferDataSHEDeferred::get_gbuffer_format() },
+		{ "orm", p_rb_data->get_orm(), RenderBufferDataSHEDeferred::get_gbuffer_format() },
+		{ "emission", p_rb_data->get_emission(), RenderBufferDataSHEDeferred::get_gbuffer_emission_format() },
+		{ "depth", p_rb_data->get_depth_color(), RenderBufferDataSHEDeferred::get_gbuffer_depth_format() },
+		{ "hdr_frame", dump_frame, rb->get_base_data_format() },
+	};
+	for (const DumpAttachment &dump : dumps) {
+		she_dump_rd_texture_to_exr(dump.texture, size, dump.format, p_dump_dir.path_join(String(dump.name) + ".exr"));
+	}
+	print_line("[SHE-DUMP] complete dir=" + p_dump_dir);
+}
+#endif // TOOLS_ENABLED
+
+// Chantier sdk, batch 2A3: initialize the G-buffer from the active
+// camera's baked DG-buffer maps (Camera3D.dg_buffer pushed through
+// camera_set_she_dgbuffer -> the cull camera -> the scene data). The
+// fullscreen quad writes albedo, normal (best-fit encoded like the
+// material pipelines) and ORM, the view-space depth attachment and the
+// base depth buffer (through the very projection matrix the geometry
+// pass rasterizes with), so the interactive geometry pass then tests
+// against the baked background depth for free. Without a DG-buffer the
+// method returns false and the caller takes the plain clear-and-rasterize
+// path, bit-identical to the pre-2A3 behavior.
+bool RenderSHEDeferred::_she_init_gbuffer_from_dg(RenderDataRD *p_render_data, const Ref<RenderBufferDataSHEDeferred> &p_rb_data, const Color &p_default_bg_color) {
+	Ref<RenderSceneBuffersRD> rb = p_render_data->render_buffers;
+	RenderSceneDataRD *scene_data = p_render_data->scene_data;
+	ERR_FAIL_COND_V(rb.is_null(), false);
+	ERR_FAIL_COND_V(scene_data == nullptr, false);
+
+	if (!scene_data->she_dg_depth.is_valid() && !scene_data->she_dg_albedo.is_valid() && !scene_data->she_dg_normal.is_valid() && !scene_data->she_dg_orm.is_valid()) {
+		// Plain camera: no DG-buffer bound.
+		return false;
+	}
+
+	if (!scene_data->she_dg_depth.is_valid() || !scene_data->she_dg_albedo.is_valid() || !scene_data->she_dg_normal.is_valid() || !scene_data->she_dg_orm.is_valid()) {
+		// The camera chain always pushes the four maps together: a partial
+		// binding means the DGBuffer resource did not expose one of the map
+		// properties - fail loudly and render the plain way.
+		ERR_PRINT_ONCE("SHE-deferred: the camera's DGBuffer is missing map textures (a camera_set_she_dgbuffer() call with a partial set), falling back to the clear-and-rasterize path.");
+		return false;
+	}
+
+	RendererRD::TextureStorage *texture_storage = RendererRD::TextureStorage::get_singleton();
+	RID dg_depth_rd = texture_storage->texture_get_rd_texture(scene_data->she_dg_depth);
+	RID dg_albedo_rd = texture_storage->texture_get_rd_texture(scene_data->she_dg_albedo);
+	RID dg_normal_rd = texture_storage->texture_get_rd_texture(scene_data->she_dg_normal);
+	RID dg_orm_rd = texture_storage->texture_get_rd_texture(scene_data->she_dg_orm);
+	if (dg_depth_rd.is_null() || dg_albedo_rd.is_null() || dg_normal_rd.is_null() || dg_orm_rd.is_null()) {
+		ERR_PRINT_ONCE("SHE-deferred: the camera's DGBuffer maps could not be resolved to GPU textures, falling back to the clear-and-rasterize path.");
+		return false;
+	}
+
+	Size2i screen_size = rb->get_internal_size();
+
+	// Scene data UBO for the projection matrix (the exact rasterizer one)
+	// and the near/far clip shell the depth map encodes.
+	if (dg_init_scene_data_ubo.is_null()) {
+		dg_init_scene_data_ubo = scene_data->create_uniform_buffer();
+	}
+	scene_data->update_ubo(dg_init_scene_data_ubo, get_debug_draw_mode(), p_render_data->environment, RID(), p_render_data->camera_attributes, false, screen_size, screen_size, p_default_bg_color, rb->get_luminance_multiplier(), true, false);
+
+	RID dg_init_rid = dg_init_shader.version_get_shader(dg_init_shader_version, 0);
+	ERR_FAIL_COND_V(dg_init_rid.is_null(), false);
+
+	RendererRD::MaterialStorage::Samplers samplers = rb->get_samplers();
+	RID linear_sampler = samplers.get_sampler(RSE::CANVAS_ITEM_TEXTURE_FILTER_LINEAR, RSE::CANVAS_ITEM_TEXTURE_REPEAT_DISABLED);
+	RID nearest_sampler = samplers.get_sampler(RSE::CANVAS_ITEM_TEXTURE_FILTER_NEAREST, RSE::CANVAS_ITEM_TEXTURE_REPEAT_DISABLED);
+
+	RID uniform_set = UniformSetCacheRD::get_singleton()->get_cache(dg_init_rid, 0,
+			RD::Uniform(RD::UNIFORM_TYPE_UNIFORM_BUFFER, 0, dg_init_scene_data_ubo),
+			RD::Uniform(RD::UNIFORM_TYPE_SAMPLER_WITH_TEXTURE, 1, Vector<RID>({ nearest_sampler, dg_depth_rd })),
+			RD::Uniform(RD::UNIFORM_TYPE_SAMPLER_WITH_TEXTURE, 2, Vector<RID>({ linear_sampler, dg_albedo_rd })),
+			RD::Uniform(RD::UNIFORM_TYPE_SAMPLER_WITH_TEXTURE, 3, Vector<RID>({ linear_sampler, dg_normal_rd })),
+			RD::Uniform(RD::UNIFORM_TYPE_SAMPLER_WITH_TEXTURE, 4, Vector<RID>({ linear_sampler, dg_orm_rd })),
+			RD::Uniform(RD::UNIFORM_TYPE_SAMPLER_WITH_TEXTURE, 5, Vector<RID>({ nearest_sampler, best_fit_normal_texture })));
+
+	// The init framebuffer carries exactly what the pass writes: the four
+	// DG-buffer-initialized G-buffer attachments plus the shared base depth
+	// buffer (emission stays untouched - the geometry pass clears it, no DG
+	// emission map exists in this batch).
+	RID init_fb = FramebufferCacheRD::get_singleton()->get_cache_multiview(1, p_rb_data->get_albedo(), p_rb_data->get_normal(), p_rb_data->get_orm(), p_rb_data->get_depth_color(), rb->get_depth_texture());
+
+	RD::DrawListID draw_list = RD::get_singleton()->draw_list_begin(init_fb, RD::DRAW_DEFAULT_ALL);
+	RD::get_singleton()->draw_list_bind_render_pipeline(draw_list, dg_init_pipeline.get_render_pipeline(RD::INVALID_ID, RD::get_singleton()->framebuffer_get_format(init_fb)));
+	RD::get_singleton()->draw_list_bind_uniform_set(draw_list, uniform_set, 0);
+	RD::get_singleton()->draw_list_bind_index_array(draw_list, RendererRD::MaterialStorage::get_singleton()->get_quad_index_array());
+	RD::get_singleton()->draw_list_draw(draw_list, true);
+	RD::get_singleton()->draw_list_end();
+
+	return true;
 }
 
 void RenderSHEDeferred::_render_scene(RenderDataRD *p_render_data, const Color &p_default_bg_color) {
@@ -313,6 +520,12 @@ void RenderSHEDeferred::_render_scene(RenderDataRD *p_render_data, const Color &
 
 	RID rp_uniform_set = _setup_render_pass_uniform_set(RENDER_LIST_OPAQUE, nullptr, false, RID(), RendererRD::MaterialStorage::get_singleton()->samplers_rd_get_default(), gbuffer_uniform_buffer_index);
 
+	// G-buffer init from the camera's DG-buffer (chantier sdk, batch 2A3).
+	// With no DG-buffer bound this is a no-op returning false and the draw
+	// below takes the historical full-clear path, bit-identical to the
+	// pre-2A3 behavior (strict regression scope of the renderer harness).
+	bool she_dg_initialized = _she_init_gbuffer_from_dg(p_render_data, rb_data, p_default_bg_color);
+
 	{
 		RenderListParameters render_list_params(render_list[RENDER_LIST_OPAQUE].elements.ptr(), render_list[RENDER_LIST_OPAQUE].element_info.ptr(), render_list[RENDER_LIST_OPAQUE].elements.size(), true, PASS_MODE_DEPTH_MATERIAL, 0, true, false, rp_uniform_set);
 		Vector<Color> clear = {
@@ -322,7 +535,17 @@ void RenderSHEDeferred::_render_scene(RenderDataRD *p_render_data, const Color &
 			Color(0.0, 0.0, 0.0, 0), // Emission.
 			Color(0.0, 0.0, 0.0, 0), // View-space depth (sink attachment).
 		};
-		_render_list_with_draw_list(&render_list_params, rb_data->get_gbuffer_fb(), RD::DRAW_CLEAR_ALL, clear, 0.0f, 0u, Rect2());
+		if (she_dg_initialized) {
+			// The init pass wrote albedo, normal, ORM, the view-space depth
+			// attachment and the base depth buffer: the geometry pass clears
+			// only the emission attachment (no DG emission map exists in
+			// this batch) and draws the interactive geometry on top of the
+			// baked background, which occludes it through the depth test
+			// against the baked base depth.
+			_render_list_with_draw_list(&render_list_params, rb_data->get_gbuffer_fb(), RD::DRAW_CLEAR_COLOR_3, clear, 0.0f, 0u, Rect2());
+		} else {
+			_render_list_with_draw_list(&render_list_params, rb_data->get_gbuffer_fb(), RD::DRAW_CLEAR_ALL, clear, 0.0f, 0u, Rect2());
+		}
 	}
 
 	RD::get_singleton()->draw_command_end_label();
@@ -639,6 +862,57 @@ void RenderSHEDeferred::_render_scene(RenderDataRD *p_render_data, const Color &
 		RD::get_singleton()->draw_command_end_label();
 	}
 
+	// G-buffer dump (chantier sdk, batch 2A3): consume the one-shot
+	// RenderingServer::she_request_gbuffer_dump() request now: the
+	// G-buffer attachments are final (geometry and transparent passes
+	// done) and the HDR color buffer still holds the linear scene ahead
+	// of the inherited post-process. The CPU readback stalls the draw
+	// inside the frame - a debug/dump path, not a release rendering path.
+	// Editor instrumentation (TOOLS_ENABLED), stripped from packaged game
+	// templates.
+#ifdef TOOLS_ENABLED
+	{
+		String she_dump_dir = take_she_gbuffer_dump_request();
+		if (!she_dump_dir.is_empty()) {
+			_she_dump_gbuffer(p_render_data, rb_data, she_dump_dir);
+		}
+	}
+
+	// SHE debug draw views (chantier sdk, batch 2A3): display one
+	// G-buffer attachment as the visible frame, through the inherited
+	// post-process chain (the same debug draw plumbing route as the other
+	// renderers: the enum value travels viewport_set_debug_draw() ->
+	// set_debug_draw_mode() -> here). The blit overwrites the HDR color
+	// buffer, so it deliberately comes after the dump block above.
+	{
+		RSE::ViewportDebugDraw she_debug_draw = get_debug_draw_mode();
+		if (she_debug_draw >= RSE::VIEWPORT_DEBUG_DRAW_SHE_GB_ALBEDO &&
+				she_debug_draw <= RSE::VIEWPORT_DEBUG_DRAW_SHE_GB_DEPTH) {
+			RID source;
+			switch (she_debug_draw) {
+				case RSE::VIEWPORT_DEBUG_DRAW_SHE_GB_ALBEDO:
+					source = rb_data->get_albedo();
+					break;
+				case RSE::VIEWPORT_DEBUG_DRAW_SHE_GB_NORMAL:
+					source = rb_data->get_normal();
+					break;
+				case RSE::VIEWPORT_DEBUG_DRAW_SHE_GB_ORM:
+					source = rb_data->get_orm();
+					break;
+				case RSE::VIEWPORT_DEBUG_DRAW_SHE_GB_EMISSION:
+					source = rb_data->get_emission();
+					break;
+				case RSE::VIEWPORT_DEBUG_DRAW_SHE_GB_DEPTH:
+					source = rb_data->get_depth_color();
+					break;
+				default:
+					break;
+			}
+			_render_she_debug_view(source, FramebufferCacheRD::get_singleton()->get_cache(rb->get_internal_texture()));
+		}
+	}
+#endif // TOOLS_ENABLED
+
 	RENDER_TIMESTAMP("SHE-deferred Post-Process");
 	_render_buffers_post_process_and_tonemap(p_render_data);
 }
@@ -654,6 +928,22 @@ RenderSHEDeferred::RenderSHEDeferred() {
 	lighting_shader_version = lighting_shader.version_create();
 
 	lighting_pipeline.setup(lighting_shader.version_get_shader(lighting_shader_version, 0), RD::RENDER_PRIMITIVE_TRIANGLES, RD::PipelineRasterizationState(), RD::PipelineMultisampleState(), RD::PipelineDepthStencilState(), RD::PipelineColorBlendState::create_disabled(), 0);
+
+	// Initialize the debug-view blit (chantier sdk, batch 2A3: debug draw
+	// attachment views + the HDR copy of the gbuffer dump). Editor
+	// instrumentation (TOOLS_ENABLED): never initialized in packaged game
+	// templates.
+#ifdef TOOLS_ENABLED
+	{
+		Vector<String> debug_view_modes;
+		debug_view_modes.push_back("\n");
+
+		debug_view_shader.initialize(debug_view_modes, "\n");
+		debug_view_shader_version = debug_view_shader.version_create();
+
+		debug_view_pipeline.setup(debug_view_shader.version_get_shader(debug_view_shader_version, 0), RD::RENDER_PRIMITIVE_TRIANGLES, RD::PipelineRasterizationState(), RD::PipelineMultisampleState(), RD::PipelineDepthStencilState(), RD::PipelineColorBlendState::create_disabled(), 0);
+	}
+#endif // TOOLS_ENABLED
 
 	/* DFG LUT (copy of the Forward+ initialization, see
 	 * RenderForwardClustered::RenderForwardClustered()). */
@@ -696,10 +986,84 @@ RenderSHEDeferred::RenderSHEDeferred() {
 		dfg_shader.version_free(dfg_shader_version);
 
 	}
+
+	// Initialize the DG-buffer G-buffer init pass (chantier sdk, batch
+	// 2A3): depth test always + write (the quad writes gl_FragDepth), four
+	// color outputs with blending disabled.
+	{
+		Vector<String> dg_init_modes;
+		dg_init_modes.push_back("\n");
+
+		dg_init_shader.initialize(dg_init_modes, "\n");
+		dg_init_shader_version = dg_init_shader.version_create();
+
+		RD::PipelineDepthStencilState depth_stencil;
+		depth_stencil.enable_depth_test = true;
+		depth_stencil.enable_depth_write = true;
+		depth_stencil.depth_compare_operator = RD::COMPARE_OP_ALWAYS;
+		dg_init_pipeline.setup(dg_init_shader.version_get_shader(dg_init_shader_version, 0), RD::RENDER_PRIMITIVE_TRIANGLES, RD::PipelineRasterizationState(), RD::PipelineMultisampleState(), depth_stencil, RD::PipelineColorBlendState::create_disabled(4), 0);
+	}
+
+	/* Best-fit normal LUT for the init pass encoder: generated like the
+	 * forward shader's own (SceneShaderForwardClustered::best_fit_normal is
+	 * private, the same regeneration-as-ourselves pattern as the DFG LUT
+	 * above). The LUT is deterministic, so the init's encode24() writes
+	 * exactly the bytes the material pipelines would write. */
+	{
+		BestFitNormalShaderRD best_fit_normal_shader;
+		Vector<String> modes;
+		modes.push_back("\n");
+		best_fit_normal_shader.initialize(modes);
+		RID best_fit_normal_shader_version = best_fit_normal_shader.version_create();
+		RID best_fit_normal_pipeline = RD::get_singleton()->compute_pipeline_create(best_fit_normal_shader.version_get_shader(best_fit_normal_shader_version, 0));
+
+		RD::TextureFormat tformat;
+		tformat.format = RD::DATA_FORMAT_R8_UNORM;
+		tformat.width = 1024;
+		tformat.height = 1024;
+		tformat.usage_bits = RD::TEXTURE_USAGE_SAMPLING_BIT | RD::TEXTURE_USAGE_STORAGE_BIT;
+		tformat.texture_type = RD::TEXTURE_TYPE_2D;
+		best_fit_normal_texture = RD::get_singleton()->texture_create(tformat, RD::TextureView());
+
+		RID shader = best_fit_normal_shader.version_get_shader(best_fit_normal_shader_version, 0);
+		ERR_FAIL_COND(shader.is_null());
+
+		Vector<RD::Uniform> uniforms;
+
+		{
+			RD::Uniform u;
+			u.binding = 0;
+			u.uniform_type = RD::UNIFORM_TYPE_IMAGE;
+			u.append_id(best_fit_normal_texture);
+			uniforms.push_back(u);
+		}
+		RID uniform_set = RD::get_singleton()->uniform_set_create(uniforms, shader, 0);
+
+		RD::ComputeListID compute_list = RD::get_singleton()->compute_list_begin();
+		RD::get_singleton()->compute_list_bind_compute_pipeline(compute_list, best_fit_normal_pipeline);
+		RD::get_singleton()->compute_list_bind_uniform_set(compute_list, uniform_set, 0);
+		RD::get_singleton()->compute_list_dispatch_threads(compute_list, tformat.width, tformat.height, 1);
+		RD::get_singleton()->compute_list_end();
+
+		best_fit_normal_shader.version_free(best_fit_normal_shader_version);
+
+	}
 }
 
 RenderSHEDeferred::~RenderSHEDeferred() {
 	lighting_shader.version_free(lighting_shader_version);
+#ifdef TOOLS_ENABLED
+	debug_view_shader.version_free(debug_view_shader_version);
+#endif // TOOLS_ENABLED
+	dg_init_shader.version_free(dg_init_shader_version);
+
+	// Free the DG init resources created with RD directly.
+	if (dg_init_scene_data_ubo.is_valid()) {
+		RD::get_singleton()->free_rid(dg_init_scene_data_ubo);
+	}
+	if (best_fit_normal_texture.is_valid()) {
+		RD::get_singleton()->free_rid(best_fit_normal_texture);
+	}
 
 	// Free the deferred pass resources created with RD directly (the ones
 	// owned by RS, the LTC LUTs, are freed below with RS::free_rid).

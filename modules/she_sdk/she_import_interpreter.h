@@ -70,6 +70,12 @@ public:
 	// (see she_import.h point 3).
 	void apply_visual_drops(Node *p_scene_root) const;
 
+	// DG post-import (batch 2A3): generate the DGBuffer resources from the
+	// bake descriptor, pin the maps' .import options, and bind the scene
+	// cameras by name - see she_dg.h for the contract (no-op without the
+	// scene flag or the dg/bake.json descriptor).
+	void apply_dg_buffers(Node *p_scene_root, const String &p_source_file) const;
+
 protected:
 	static void _bind_methods();
 };

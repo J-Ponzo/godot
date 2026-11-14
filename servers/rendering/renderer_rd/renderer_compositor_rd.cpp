@@ -213,6 +213,17 @@ float RendererCompositorRD::_compute_reference_multiplier(RD::ColorSpace p_color
 	}
 }
 
+// SHEngine fork addition (chantier sdk, batch 2A3): forward the
+// RenderingServer G-buffer dump request to the scene renderer that owns
+// the deferred G-buffer (the only consumer of the request). Editor builds
+// only (TOOLS_ENABLED): dump instrumentation never ships in packaged game
+// templates.
+#ifdef TOOLS_ENABLED
+void RendererCompositorRD::she_request_gbuffer_dump(const String &p_dump_dir) {
+	scene->set_she_gbuffer_dump_request(p_dump_dir);
+}
+#endif // TOOLS_ENABLED
+
 void RendererCompositorRD::set_boot_image_with_stretch(const Ref<Image> &p_image, const Color &p_color, RSE::SplashStretchMode p_stretch_mode, bool p_use_filter) {
 	if (p_image.is_null() || p_image->is_empty()) {
 		return;
