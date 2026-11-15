@@ -61,6 +61,15 @@ struct BakeCamera {
 	double clip_near = 0.0;
 	double clip_far = 0.0;
 	HashMap<String, String> map_files; // Map name -> flat file name in dg/.
+	// Lens-shift transport (design.md "Shift caméra", session 2026-11-15):
+	// the raw Blender "shift" fractions (provenance) and the resolved
+	// "frustum_offset" in meters at the near plane (what to apply verbatim)
+	// travel as a pair written by she_bake. has_* = key present; both
+	// absent = the retro identity (0, 0).
+	bool has_shift = false;
+	bool has_frustum_offset = false;
+	double shift[2] = { 0.0, 0.0 };
+	double frustum_offset[2] = { 0.0, 0.0 };
 };
 
 bool _get_number(const Variant &p_value, double &r_out) {
@@ -157,6 +166,47 @@ bool _parse_bake_descriptor(const String &p_bake_path, List<BakeCamera> &r_camer
 		}
 		if (z_to_array.size() != 2 || !_get_number(z_to_array[0], z_to[0]) || !_get_number(z_to_array[1], z_to[1]) || z_to[0] != 0.0 || z_to[1] != 1.0) {
 			ERR_PRINT(vformat("%sBake descriptor '%s': camera '%s' does not use the [0, 1] z remap the G-buffer init decodes (z_to).", SHE_DG_PREFIX, p_bake_path, bake_camera.name));
+			all_valid = false;
+			continue;
+		}
+
+		// Lens-shift transport: the "shift" (raw Blender fractions, x/y) and
+		// "frustum_offset" (resolved meters at the near plane) keys travel as
+		// a pair - the current she_bake writes both on every camera; one
+		// without the other, or a size other than 2, is a state the recipe
+		// cannot produce (stale or hand-edited descriptor). Both absent =
+		// the retro identity (0, 0): nothing to apply.
+		const Variant shift_v = camera.get("shift", Variant());
+		const Variant offset_v = camera.get("frustum_offset", Variant());
+		bake_camera.has_shift = shift_v.get_type() == Variant::ARRAY;
+		bake_camera.has_frustum_offset = offset_v.get_type() == Variant::ARRAY;
+		{
+			Array shift;
+			Array offset;
+			if (bake_camera.has_shift) {
+				shift = shift_v;
+			}
+			if (bake_camera.has_frustum_offset) {
+				offset = offset_v;
+			}
+			if (bake_camera.has_shift != bake_camera.has_frustum_offset
+					|| (bake_camera.has_shift
+							&& (shift.size() != 2 || offset.size() != 2
+									|| !_get_number(shift[0], bake_camera.shift[0])
+									|| !_get_number(shift[1], bake_camera.shift[1])
+									|| !_get_number(offset[0], bake_camera.frustum_offset[0])
+									|| !_get_number(offset[1], bake_camera.frustum_offset[1])))) {
+				ERR_PRINT(vformat("%sBake descriptor '%s': camera '%s' has a malformed lens-shift transport - the 'shift' (raw Blender fractions, x/y) and 'frustum_offset' (resolved meters at the near plane) keys travel as a pair, write both or neither.", SHE_DG_PREFIX, p_bake_path, bake_camera.name));
+				all_valid = false;
+				continue;
+			}
+		}
+		const bool shift_raw_zero = (bake_camera.shift[0] == 0.0 && bake_camera.shift[1] == 0.0);
+		const bool shift_offset_zero = (bake_camera.frustum_offset[0] == 0.0 && bake_camera.frustum_offset[1] == 0.0);
+		if (bake_camera.has_shift && shift_raw_zero != shift_offset_zero) {
+			ERR_PRINT(vformat("%sBake descriptor '%s': camera '%s' records shift (%s, %s) but frustum_offset (%s, %s), or the converse - a zero raw shift must transport a zero offset and vice versa; stale or hand-edited descriptor, the camera is not imported.", SHE_DG_PREFIX, p_bake_path, bake_camera.name,
+					rtos(bake_camera.shift[0]), rtos(bake_camera.shift[1]),
+					rtos(bake_camera.frustum_offset[0]), rtos(bake_camera.frustum_offset[1])));
 			all_valid = false;
 			continue;
 		}
@@ -263,6 +313,7 @@ void apply_dg_post_import(Node *p_scene_root, const String &p_source_file) {
 
 	int generated_count = 0;
 	int bound_count = 0;
+	int shifted_count = 0;
 	for (const BakeCamera &bake_camera : bake_cameras) {
 		bool generate_failed = false;
 		Ref<Texture2D> slots[DG_MAP_SLOT_COUNT];
@@ -318,12 +369,49 @@ void apply_dg_post_import(Node *p_scene_root, const String &p_source_file) {
 						bake_camera.name, rtos(camera->get_near()), rtos(camera->get_far()), rtos(bake_camera.clip_near), rtos(bake_camera.clip_far)));
 				continue;
 			}
+			// Lens shift (design.md "Shift caméra", session 2026-11-15): the
+			// descriptor already resolved the window-center translation in
+			// meters at the near plane; the camera must switch from
+			// PROJECTION_PERSPECTIVE to PROJECTION_FRUSTUM to carry it -
+			// set_frustum_offset() alone is inert on a perspective camera
+			// (it re-pushes camera_set_perspective), so set_frustum() does
+			// the mode switch and the server push in one call. The frustum
+			// size recomputes from the imported vertical fov (glTF yfov
+			// under KEEP_HEIGHT, the importer default we require) so the
+			// off-axis window keeps the baked frame extents at the runtime
+			// aspect. A rejected shift leaves the runtime camera unshifted
+			// against shifted maps: wholesale misalignment, the same class
+			// as a stale clip - the camera stays unbound (a wrong init is
+			// worse than no init).
+			const bool shifted = (bake_camera.has_shift
+					&& (bake_camera.frustum_offset[0] != 0.0 || bake_camera.frustum_offset[1] != 0.0));
+			if (shifted) {
+				if (camera->get_projection() != Camera3D::PROJECTION_PERSPECTIVE) {
+					ERR_PRINT(vformat("%sCamera '%s': the bake carries a lens shift (frustum offset %s, %s) but the imported camera is not perspective (projection %d); DGBuffer not bound.", SHE_DG_PREFIX,
+							bake_camera.name, rtos(bake_camera.frustum_offset[0]), rtos(bake_camera.frustum_offset[1]), (int)camera->get_projection()));
+					continue;
+				}
+				if (camera->get_keep_aspect_mode() != Camera3D::KEEP_HEIGHT) {
+					ERR_PRINT(vformat("%sCamera '%s': the bake carries a lens shift (frustum offset %s, %s) but the imported camera's keep_aspect is not KEEP_HEIGHT - the fov axis is ambiguous, the frustum size cannot be recomputed; DGBuffer not bound.", SHE_DG_PREFIX,
+							bake_camera.name, rtos(bake_camera.frustum_offset[0]), rtos(bake_camera.frustum_offset[1])));
+					continue;
+				}
+				const double frustum_size = 2.0 * (double)camera->get_near()
+						* Math::tan(Math::deg_to_rad((double)camera->get_fov()) * 0.5);
+				camera->set_frustum((real_t)frustum_size,
+						Vector2((real_t)bake_camera.frustum_offset[0], (real_t)bake_camera.frustum_offset[1]),
+						camera->get_near(), camera->get_far());
+				shifted_count++;
+				print_line(vformat("%scamera '%s': shifted - frustum offset (%s, %s) m at near %s (bake shift %s, %s).", SHE_DG_PREFIX,
+						bake_camera.name, rtos(bake_camera.frustum_offset[0]), rtos(bake_camera.frustum_offset[1]), rtos(camera->get_near()),
+						rtos(bake_camera.shift[0]), rtos(bake_camera.shift[1])));
+			}
 			camera->set_dg_buffer(dg_buffer);
 			bound_count++;
 		}
 	}
 
-	print_line(vformat("%s%s: generated %d DGBuffer(s), bound %d camera(s), pinned %d import(s)%s.", SHE_DG_PREFIX, p_source_file, generated_count, bound_count, pinned_count,
+	print_line(vformat("%s%s: generated %d DGBuffer(s), bound %d camera(s), shifted %d camera(s), pinned %d import(s)%s.", SHE_DG_PREFIX, p_source_file, generated_count, bound_count, shifted_count, pinned_count,
 			unimported_maps > 0 ? vformat(" (%d map(s) not imported yet - pinned on the next import of the scene source)", unimported_maps) : String()));
 }
 
