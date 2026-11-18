@@ -10,4 +10,9 @@ module_obj = []
 
 env_she_sdk.add_source_files(module_obj, "*.cpp")
 
+# Editor-side sources (hub contracts plugin, batch 2A5) — editor builds
+# only, template builds never include them (mirrors the gltf module).
+if env.editor_build:
+    env_she_sdk.add_source_files(module_obj, "editor/*.cpp")
+
 env.modules_sources += module_obj
