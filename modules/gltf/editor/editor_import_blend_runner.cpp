@@ -116,6 +116,7 @@ bpy.ops.export_scene.gltf(**opts['gltf_options'])
 // the `she` delimiter on purpose: the Python contains `)"` sequences that
 // would terminate a plain `R"(...)"`.
 static constexpr char PYTHON_SCRIPT_SHE_SELECT[] = R"she(
+import bpy
 _SHE_STR_AXES = {
   'she_collision': ('none', 'static', 'rigid', 'area'),
   'she_collision_shape': ('trimesh', 'convex'),
@@ -379,9 +380,15 @@ Error EditorImportBlendRunner::do_import_rpc(const Dictionary &p_options) {
 	// Start Blender if not already running.
 	if (!is_running()) {
 		// Start an XML RPC server on the given port.
-		// The SHE selection block is appended after the RPC server loop: its
-		// definitions are late-bound, `export_gltf` resolves them at call time.
-		String python = vformat(PYTHON_SCRIPT_RPC, rpc_port) + PYTHON_SCRIPT_SHE_SELECT;
+		// The SHE selection block is prepended to the RPC script: its
+		// definitions must PARSE before the RPC server loop takes over
+		// (a loop that never ends while the thread lives -- appending
+		// the block after it left the definitions unreachable and every
+		// export on the RPC path died with NameError; found in the
+		// packaging 3A3-suite smoke once the packaged Blender got
+		// pinned, 2026-11-25). The block imports bpy itself, so its
+		// position is the only contract.
+		String python = PYTHON_SCRIPT_SHE_SELECT + vformat(PYTHON_SCRIPT_RPC, rpc_port);
 		Error err = start_blender(python, false);
 		if (err != OK || blender_pid == 0) {
 			return FAILED;
